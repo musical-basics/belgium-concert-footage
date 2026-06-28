@@ -251,6 +251,7 @@ function wireForm() {
 }
 
 function addPending() {
+  clearForm();                          // always start a fresh entry (not an edit)
   if (State.pendingIn != null) $('#fIn').value = State.pendingIn;
   if (State.pendingOut != null) $('#fOut').value = State.pendingOut;
   $('#fTitle').focus();
