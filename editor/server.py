@@ -15,13 +15,16 @@ No third-party dependencies.
 import json
 import os
 import re
+import sqlite3
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EDITOR_DIR = os.path.join(ROOT, "editor")
 PROXY_DIR = os.path.join(ROOT, "proxies")
-MARKERS_PATH = os.path.join(ROOT, "markers.json")
+DB_PATH = os.path.join(ROOT, "markers.db")
+MARKERS_PATH = os.path.join(ROOT, "markers.json")  # JSON mirror for the render pipeline
 META_PATH = os.path.join(ROOT, "cache", "clips_meta.json")
 WAVE_BIN = os.path.join(ROOT, "cache", "waveform.u8")
 WAVE_META = os.path.join(ROOT, "cache", "waveform.json")
@@ -47,6 +50,122 @@ CONTENT_TYPES = {
 
 def guess_type(path):
     return CONTENT_TYPES.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
+
+
+# ---- persistence (SQLite, source of truth) ---------------------------
+# markers.db is the durable store. Each save also mirrors to markers.json so
+# render/render.py keeps reading a plain file. A new connection is opened per
+# call (sqlite3 connections aren't shareable across ThreadingHTTPServer
+# threads); _DB_LOCK serializes writes so concurrent saves can't interleave.
+_DB_LOCK = threading.Lock()
+
+DEFAULT_PROJECT = {
+    "seed": 42,
+    "project": "Belgium Concert Highlights",
+    "fps": 60,
+    "duration": 5764.7,
+    "audio_source": "back",
+}
+
+
+def db_connect():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def db_init():
+    """Create the schema, and seed from markers.json on first run so existing
+    work isn't lost when migrating off the flat file."""
+    with db_connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS project (
+                id           INTEGER PRIMARY KEY CHECK (id = 1),
+                seed         INTEGER NOT NULL DEFAULT 42,
+                project      TEXT,
+                fps          REAL,
+                duration     REAL,
+                audio_source TEXT
+            );
+            CREATE TABLE IF NOT EXISTS performances (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                ordinal  INTEGER NOT NULL,
+                title    TEXT,
+                composer TEXT,
+                in_s     REAL NOT NULL,
+                out_s    REAL NOT NULL
+            );
+            """
+        )
+        row = conn.execute("SELECT id FROM project WHERE id = 1").fetchone()
+        if row is None:
+            seed = dict(DEFAULT_PROJECT)
+            if os.path.isfile(MARKERS_PATH):
+                try:
+                    with open(MARKERS_PATH) as f:
+                        existing = json.load(f)
+                    seed.update({k: existing[k] for k in DEFAULT_PROJECT if k in existing})
+                    _write_performances(conn, existing.get("performances", []))
+                    print(f"Seeded markers.db from {MARKERS_PATH} "
+                          f"({len(existing.get('performances', []))} performances)")
+                except Exception as e:
+                    print(f"Could not seed from markers.json: {e}")
+            conn.execute(
+                "INSERT INTO project (id, seed, project, fps, duration, audio_source) "
+                "VALUES (1, ?, ?, ?, ?, ?)",
+                (seed["seed"], seed["project"], seed["fps"], seed["duration"],
+                 seed["audio_source"]),
+            )
+
+
+def _write_performances(conn, perfs):
+    conn.execute("DELETE FROM performances")
+    conn.executemany(
+        "INSERT INTO performances (ordinal, title, composer, in_s, out_s) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(i, p.get("title"), p.get("composer"), p.get("in"), p.get("out"))
+         for i, p in enumerate(perfs)],
+    )
+
+
+def db_load():
+    with db_connect() as conn:
+        prow = conn.execute(
+            "SELECT seed, project, fps, duration, audio_source FROM project WHERE id = 1"
+        ).fetchone()
+        meta = dict(prow) if prow else dict(DEFAULT_PROJECT)
+        perfs = [
+            {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"]}
+            for r in conn.execute(
+                "SELECT title, composer, in_s, out_s FROM performances ORDER BY ordinal"
+            )
+        ]
+    meta["performances"] = perfs
+    return meta
+
+
+def db_save(data):
+    """Persist a full project payload, then mirror to markers.json."""
+    with _DB_LOCK:
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT INTO project (id, seed, project, fps, duration, audio_source) "
+                "VALUES (1, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "seed=excluded.seed, project=excluded.project, fps=excluded.fps, "
+                "duration=excluded.duration, audio_source=excluded.audio_source",
+                (data.get("seed", 42), data.get("project"), data.get("fps"),
+                 data.get("duration"), data.get("audio_source")),
+            )
+            _write_performances(conn, data.get("performances", []))
+        # Mirror the canonical view back out for the render pipeline.
+        mirror = db_load()
+        tmp = MARKERS_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(mirror, f, indent=2)
+        os.replace(tmp, MARKERS_PATH)
+        return mirror
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -163,9 +282,11 @@ class Handler(BaseHTTPRequestHandler):
                 data = json.loads(raw.decode("utf-8"))
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 400)
-            with open(MARKERS_PATH, "w") as f:
-                json.dump(data, f, indent=2)
-            return self._send_json({"ok": True, "saved": MARKERS_PATH})
+            try:
+                db_save(data)
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+            return self._send_json({"ok": True, "saved": DB_PATH})
         self.send_error(404, "Not found")
 
     # ---- data --------------------------------------------------------
@@ -189,16 +310,15 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _load_markers(self):
-        if os.path.isfile(MARKERS_PATH):
-            with open(MARKERS_PATH) as f:
-                return json.load(f)
-        return {"seed": 42, "performances": []}
+        return db_load()
 
 
 def main():
     os.chdir(ROOT)
+    db_init()
     httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Editor running at  http://localhost:{PORT}")
+    print(f"Markers DB:        {DB_PATH}")
     print(f"Project root:      {ROOT}")
     print("Press Ctrl+C to stop.")
     try:

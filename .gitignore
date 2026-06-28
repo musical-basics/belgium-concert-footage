@@ -27,6 +27,12 @@
 !/cache/clips_meta.json
 !/cache/waveform.json
 
+# Local runtime data — markers.db is the live store; markers.json is the
+# committed snapshot the render pipeline reads.
+*.db
+*.db-wal
+*.db-shm
+
 # Python
 __pycache__/
 *.pyc
