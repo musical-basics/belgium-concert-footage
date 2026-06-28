@@ -68,36 +68,40 @@ DEFAULT_PROJECT = {
 }
 
 
+_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS project (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        seed         INTEGER NOT NULL DEFAULT 42,
+        project      TEXT,
+        fps          REAL,
+        duration     REAL,
+        audio_source TEXT
+    );
+    CREATE TABLE IF NOT EXISTS performances (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        ordinal  INTEGER NOT NULL,
+        title    TEXT,
+        composer TEXT,
+        in_s     REAL NOT NULL,
+        out_s    REAL NOT NULL
+    );
+"""
+
+
 def db_connect():
+    # Ensure the schema on every connection (cheap, idempotent) so the tables
+    # exist even if markers.db was deleted/moved while the server is running —
+    # connections are per-request, so we can't rely on a one-time startup init.
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.executescript(_SCHEMA)
     return conn
 
 
 def db_init():
-    """Create the schema, and seed from markers.json on first run so existing
-    work isn't lost when migrating off the flat file."""
+    """Seed from markers.json on first run so existing work isn't lost when
+    migrating off the flat file. Schema itself is ensured in db_connect()."""
     with db_connect() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS project (
-                id           INTEGER PRIMARY KEY CHECK (id = 1),
-                seed         INTEGER NOT NULL DEFAULT 42,
-                project      TEXT,
-                fps          REAL,
-                duration     REAL,
-                audio_source TEXT
-            );
-            CREATE TABLE IF NOT EXISTS performances (
-                id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                ordinal  INTEGER NOT NULL,
-                title    TEXT,
-                composer TEXT,
-                in_s     REAL NOT NULL,
-                out_s    REAL NOT NULL
-            );
-            """
-        )
         row = conn.execute("SELECT id FROM project WHERE id = 1").fetchone()
         if row is None:
             seed = dict(DEFAULT_PROJECT)
