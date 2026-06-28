@@ -141,6 +141,7 @@ function buildAudioSelect() {
       v.closest('.track').classList.toggle('audio-active', on);
     });
     State.master = State.videos[State.clips.findIndex(c => c.id === sel.value)] || State.master;
+    markDirty();
   };
 }
 
@@ -247,7 +248,7 @@ function wireForm() {
       if (b.dataset.grab === 'in') $('#fIn').value = t; else $('#fOut').value = t;
     };
   });
-  $('#seedInput').onchange = () => { State.seed = Number($('#seedInput').value) || 42; State.dirty = true; };
+  $('#seedInput').onchange = () => { State.seed = Number($('#seedInput').value) || 42; markDirty(); };
 }
 
 function addPending() {
@@ -277,7 +278,7 @@ function saveForm() {
   }
   State.perfs.sort((a, b) => a.in - b.in);
   State.selected = -1;                       // back to "new" mode so next save adds
-  State.dirty = true;
+  markDirty();
   State.pendingIn = State.pendingOut = null;
   refreshPending();
   renderPerfs(); renderBlocks();
@@ -309,7 +310,7 @@ function deletePerf(idx) {
   if (idx < 0 || idx >= State.perfs.length) return;
   if (!confirm(`Delete "${State.perfs[idx].title}"?`)) return;
   State.perfs.splice(idx, 1);
-  State.selected = -1; State.dirty = true;
+  State.selected = -1; markDirty();
   renderPerfs(); renderBlocks(); clearForm();
 }
 
@@ -595,7 +596,29 @@ function renderPerfs() {
 }
 
 /* ----------------------------------------------------------------- save */
-async function save() {
+// Autosave: any change to the performance list / settings marks State dirty
+// and schedules a debounced background save to the SQLite store. The "Save
+// markers" button still forces an immediate save.
+let _saveTimer = null;
+let _saveInFlight = false;
+
+function markDirty() {
+  State.dirty = true;
+  scheduleAutosave();
+}
+
+function scheduleAutosave(delay = 800) {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => { save({ auto: true }); }, delay);
+}
+
+async function save({ auto = false } = {}) {
+  clearTimeout(_saveTimer);                 // cancel any pending debounce
+  if (_saveInFlight) {                       // a save is already running
+    if (State.dirty) scheduleAutosave(300);  // retry once it lands
+    return;
+  }
+  const s = $('#status');
   const payload = {
     seed: Number($('#seedInput').value) || 42,
     project: 'Belgium Concert Highlights',
@@ -606,15 +629,26 @@ async function save() {
       title: p.title, composer: p.composer, in: p.in, out: p.out,
     })),
   };
-  const res = await fetch('/api/markers', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  }).then(r => r.json());
+  _saveInFlight = true;
+  if (!auto) { s.textContent = 'saving…'; }
+  let res;
+  try {
+    res = await fetch('/api/markers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(r => r.json());
+  } catch (err) {
+    res = { ok: false, error: String(err) };
+  } finally {
+    _saveInFlight = false;
+  }
   if (res.ok) {
     State.dirty = false;
-    const s = $('#status');
-    s.textContent = `✓ saved ${State.perfs.length} performances → markers.json`;
+    s.textContent = `✓ saved ${State.perfs.length} performances`;
     s.classList.add('flash'); setTimeout(() => s.classList.remove('flash'), 600);
+  } else if (auto) {
+    s.textContent = `⚠ autosave failed (${res.error || 'unknown'}) — will retry`;
+    scheduleAutosave(3000);                  // keep trying in the background
   } else {
     alert('Save failed: ' + (res.error || 'unknown'));
   }
@@ -648,7 +682,20 @@ function escapeHtml(s) {
 }
 
 window.addEventListener('beforeunload', (e) => {
-  if (State.dirty) { e.preventDefault(); e.returnValue = ''; }
+  if (!State.dirty) return;
+  // Flush the latest state past the debounce window. sendBeacon survives the
+  // page teardown that a normal fetch would not.
+  const payload = {
+    seed: Number($('#seedInput').value) || 42,
+    project: 'Belgium Concert Highlights',
+    fps: State.fps,
+    duration: State.duration,
+    audio_source: $('#audioSource').value,
+    performances: State.perfs.map(p => ({
+      title: p.title, composer: p.composer, in: p.in, out: p.out,
+    })),
+  };
+  navigator.sendBeacon('/api/markers', new Blob([JSON.stringify(payload)], { type: 'application/json' }));
 });
 
 boot();
