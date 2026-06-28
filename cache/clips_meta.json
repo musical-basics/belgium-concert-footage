@@ -1,0 +1,12 @@
+{
+  "duration": 5764.7,
+  "fps": 60,
+  "width": 1280,
+  "height": 720,
+  "audio_sample_rate": 48000,
+  "sources": {
+    "back": "Main Footage/Back Camera.mov",
+    "livestream": "Main Footage/Livestream Footage.mov",
+    "piano": "Main Footage/camera next to piano.mov"
+  }
+}

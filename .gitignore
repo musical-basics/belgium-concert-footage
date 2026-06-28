@@ -1,0 +1,35 @@
+# Media — never commit raw footage, proxies, or renders (multi-GB, exceeds GitHub limits)
+*.mp4
+*.mov
+*.MOV
+*.MP4
+*.mkv
+*.wav
+*.aac
+*.mp3
+
+# Project media folders
+/Main Footage/
+/proxies/
+/output/
+/swisstransfer_*/
+*.fcpbundle/
+
+# Top-level source clips
+/5D*.mp4
+/CC Factorij*.mp4
+/60 secnds*.mp4
+/IMG_*.MOV
+/Lionel Yu Piano is live!.mp4
+
+# Cache — keep small metadata, ignore regenerable binaries/logs
+/cache/*
+!/cache/clips_meta.json
+!/cache/waveform.json
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
