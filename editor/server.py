@@ -236,9 +236,17 @@ def restore_backup(backup_id):
             row = conn.execute(
                 "SELECT payload FROM region_backups WHERE id = ?", (backup_id,)
             ).fetchone()
-        if row is None:
-            return None
-    return db_save(json.loads(row["payload"]))
+            if row is None:
+                return None
+            # Safety snapshot of the live state first, so a restore is itself
+            # reversible even when we're not on a BACKUP_EVERY boundary.
+            cur = conn.execute(
+                "SELECT write_count FROM backup_state WHERE id = 1"
+            ).fetchone()
+            _create_backup(conn, _load(conn), cur[0] if cur else 0, datetime.now())
+            _prune_backups(conn)
+        payload = json.loads(row["payload"])
+    return db_save(payload)
 
 
 def db_save(data):

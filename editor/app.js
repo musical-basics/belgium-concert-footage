@@ -70,6 +70,7 @@ async function boot() {
 
   wireTransport();
   wireForm();
+  wireBackups();
   wireKeys();
   tickLoop();
   updateStatus();
@@ -885,6 +886,90 @@ async function save({ auto = false } = {}) {
   } else {
     alert('Save failed: ' + (res.error || 'unknown'));
   }
+}
+
+/* -------------------------------------------------------------- backups */
+// Browse the automatic region_backups (one every 5 saves; newest 100 kept in
+// full, older ones thinned to 1/day) and roll back to any of them.
+function wireBackups() {
+  const modal = $('#backupsModal');
+  const close = () => { modal.hidden = true; };
+  $('#backupsBtn').onclick = () => { modal.hidden = false; loadBackups(); };
+  $('#backupsClose').onclick = close;
+  $('#backupsRefresh').onclick = loadBackups;
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !modal.hidden) close();
+  });
+}
+
+function fmtWhen(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${M[d.getMonth()]} ${d.getDate()}, ${hh}:${mm}`;
+}
+
+async function loadBackups() {
+  const ol = $('#backupList'), st = $('#backupsStatus');
+  st.textContent = 'loading…';
+  const data = await fetch('/api/backups').then(r => r.json()).catch(() => ({ backups: [] }));
+  const bks = data.backups || [];
+  // A day with only one surviving snapshot is the thinned "1/day" archive.
+  const perDay = {};
+  bks.forEach(b => { perDay[b.day] = (perDay[b.day] || 0) + 1; });
+  ol.innerHTML = '';
+  st.textContent = bks.length ? `${bks.length} kept` : '';
+  if (!bks.length) {
+    ol.innerHTML = '<div class="backup-empty">No backups yet — one is saved after every 5 changes.</div>';
+    return;
+  }
+  bks.forEach(b => {
+    const when = fmtWhen(b.created_at);
+    const daily = perDay[b.day] === 1;
+    const li = document.createElement('li');
+    li.innerHTML = `
+      <span class="when"><b>${when}</b> <small>· write #${b.write_no}</small></span>
+      ${daily ? '<span class="daytag" title="Daily archive — one kept per day">1/day</span>' : ''}
+      <span class="count">${b.n_regions} region${b.n_regions === 1 ? '' : 's'}</span>
+      <button class="small" data-act="restore">Restore</button>`;
+    li.querySelector('[data-act=restore]').onclick = () => restoreBackup(b.id, when);
+    ol.appendChild(li);
+  });
+}
+
+function applyMarkers(m) {
+  State.seed = (m && m.seed) || 42;
+  $('#seedInput').value = State.seed;
+  State.perfs = (m && m.performances) ? m.performances.slice() : [];
+  const sel = $('#audioSource');
+  if (m && m.audio_source && sel && [...sel.options].some(o => o.value === m.audio_source)) {
+    sel.value = m.audio_source;
+  }
+  State.selected = -1;
+  State.pendingIn = State.pendingOut = null;
+  clearForm();
+  refreshPending();
+  renderPerfs(); renderBlocks();
+}
+
+async function restoreBackup(id, label) {
+  if (!confirm(`Restore the backup from ${label}?\n\nYour current state is snapshotted first, so this is reversible (⌘Z or restore that snapshot).`)) return;
+  pushUndo();                                   // client-side undo too
+  const res = await fetch('/api/backups/restore', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  }).then(r => r.json()).catch(err => ({ ok: false, error: String(err) }));
+  if (!res.ok) { alert('Restore failed: ' + (res.error || 'unknown')); return; }
+  applyMarkers(res.restored);
+  State.dirty = false;                          // server already holds this state
+  updateUndoBtn();
+  const s = $('#status');
+  s.textContent = `✓ restored ${State.perfs.length} performances`;
+  s.classList.add('flash'); setTimeout(() => s.classList.remove('flash'), 600);
+  loadBackups();                                // the safety snapshot now shows up
 }
 
 /* ----------------------------------------------------------------- keys */
