@@ -225,17 +225,15 @@ function wireTransport() {
   $('#audioSource');
 }
 
+// I / O write the playhead into the In / Out fields of the region being built
+// in the form, then refresh the orange preview from those fields.
 function markIn() {
-  State.pendingIn = +State.master.currentTime.toFixed(3);
-  if (State.pendingOut != null && State.pendingOut <= State.pendingIn) State.pendingOut = null;
-  $('#fIn').value = State.pendingIn;
-  refreshPending();
+  $('#fIn').value = +State.master.currentTime.toFixed(3);
+  syncPendingFromForm();
 }
 function markOut() {
-  State.pendingOut = +State.master.currentTime.toFixed(3);
-  if (State.pendingIn == null) State.pendingIn = 0;
-  $('#fOut').value = State.pendingOut;
-  refreshPending();
+  $('#fOut').value = +State.master.currentTime.toFixed(3);
+  syncPendingFromForm();
 }
 function refreshPending() {
   const i = State.pendingIn, o = State.pendingOut;
