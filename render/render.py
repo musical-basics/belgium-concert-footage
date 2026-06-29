@@ -66,6 +66,19 @@ def encoder_args(encoder):
 VF = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,fps={FPS},format=yuv420p,setpts=PTS-STARTPTS")
 
+# Per-camera color correction, prepended to the common VF. The Back Camera is
+# underexposed vs the other two, so lift its midtones with gamma (preserves the
+# deep blacks / saturated stage lights better than a flat brightness offset).
+# Tune the numbers here if it needs more/less.
+CAMERA_EQ = {
+    "back": "eq=gamma=1.25:brightness=0.03:saturation=1.05",
+}
+
+
+def vf_for(cam):
+    eq = CAMERA_EQ.get(cam)
+    return f"{eq},{VF}" if eq else VF
+
 
 def render_performance(perf, index, seed, audio_cam, encoder, dry):
     t_in, t_out = float(perf["in"]), float(perf["out"])
@@ -106,7 +119,7 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry):
                  "-hwaccel", "videotoolbox",
                  "-ss", f"{s['start']:.3f}", "-i", src_path(s["camera"]),
                  "-t", f"{s['duration']:.3f}",
-                 "-an", "-dn", "-vf", VF, *enc,
+                 "-an", "-dn", "-vf", vf_for(s["camera"]), *enc,
                  "-r", str(FPS), "-g", str(FPS), "-write_tmcd", "0",
                  "-video_track_timescale", "60000", out])
             lf.write(f"file '{os.path.abspath(out)}'\n")
