@@ -71,7 +71,7 @@ VF = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
 # deep blacks / saturated stage lights better than a flat brightness offset).
 # Tune the numbers here if it needs more/less.
 CAMERA_EQ = {
-    "back": "eq=gamma=1.25:brightness=0.03:saturation=1.05",
+    "back": "eq=contrast=1.08:gamma=1.30:saturation=1.05",
 }
 
 
