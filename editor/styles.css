@@ -22,6 +22,8 @@ button {
   border-radius: 7px; padding: 6px 11px; cursor: pointer; font-size: 13px;
 }
 button:hover { border-color: var(--accent); }
+button:disabled { opacity: 0.4; cursor: default; }
+button:disabled:hover { border-color: var(--line); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 button.mark { background: var(--panel2); border-color: var(--warn); color: var(--warn); }
 button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }

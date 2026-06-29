@@ -33,6 +33,7 @@ const State = {
   selected: -1,
   seed: 42,
   dirty: false,
+  undoStack: [],       // snapshots of perfs/seed taken before each edit
   view: { start: 0, span: 0 },     // visible window of the main timeline (seconds)
   wave: { ready: false, peaks: null, pps: 100, duration: 0 },
   tl: {},                          // canvas refs / offscreen cache
@@ -216,6 +217,7 @@ function wireTransport() {
   $('#markOutBtn').onclick = markOut;
   $('#addBtn').onclick = addPending;
   $('#saveBtn').onclick = save;
+  $('#undoBtn').onclick = undo;
   $('#audioSource');
 }
 
@@ -271,6 +273,7 @@ function saveForm() {
     in: +tin.toFixed(3),
     out: +tout.toFixed(3),
   };
+  pushUndo();
   if (State.selected >= 0 && State.selected < State.perfs.length) {
     State.perfs[State.selected] = { ...State.perfs[State.selected], ...perf };  // edit in place
   } else {
@@ -309,6 +312,7 @@ function selectPerf(idx, opts = {}) {
 function deletePerf(idx) {
   if (idx < 0 || idx >= State.perfs.length) return;
   if (!confirm(`Delete "${State.perfs[idx].title}"?`)) return;
+  pushUndo();
   State.perfs.splice(idx, 1);
   State.selected = -1; markDirty();
   renderPerfs(); renderBlocks(); clearForm();
@@ -375,6 +379,13 @@ function zoomAround(focusT, factor) {
   const frac = (focusT - v.start) / v.span;
   v.start = clampStart(focusT - frac * newSpan, newSpan);
   v.span = newSpan;
+  markTimelineDirty();
+}
+
+// Pan the visible window by a horizontal pixel delta (positive = scroll right).
+function panBy(dxPixels) {
+  const v = State.view;
+  v.start = clampStart(v.start + dxPixels / State.tl.w * v.span, v.span);
   markTimelineDirty();
 }
 
@@ -567,11 +578,17 @@ function wireTimelineInput() {
   t.wave.addEventListener('wheel', (e) => {
     e.preventDefault();
     const r = t.wave.getBoundingClientRect();
-    zoomAround(xToTime(e.clientX - r.left), e.deltaY < 0 ? 0.85 : 1 / 0.85);
+    // Pinch-to-zoom (trackpad sends ctrlKey) or a vertical wheel -> zoom.
+    // A horizontal two-finger swipe (deltaX dominant) -> pan the timeline.
+    if (!e.ctrlKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      panBy(e.deltaX);
+    } else {
+      zoomAround(xToTime(e.clientX - r.left), e.deltaY < 0 ? 0.85 : 1 / 0.85);
+    }
   }, { passive: false });
 
   let scrubbing = false, downX = 0, moved = false;
-  let drag = null;                                  // { i, edge } while resizing a region
+  let drag = null, dragSnapped = false;             // { i, edge } while resizing a region
   const localX = (e) => e.clientX - t.wave.getBoundingClientRect().left;
 
   t.wave.addEventListener('mousedown', (e) => {
@@ -580,7 +597,7 @@ function wireTimelineInput() {
     downX = x; moved = false;
     const h = handleHit(x, y);
     if (h) {                                        // grab an edge -> resize, don't scrub
-      drag = h;
+      drag = h; dragSnapped = false;
       selectPerf(h.i, { seek: false });
       return;
     }
@@ -589,7 +606,11 @@ function wireTimelineInput() {
     seekAll(xToTime(x));
   });
   window.addEventListener('mousemove', (e) => {
-    if (drag) { applyHandleDrag(drag, xToTime(localX(e))); return; }
+    if (drag) {
+      if (!dragSnapped) { pushUndo(); dragSnapped = true; }   // snapshot on first move
+      applyHandleDrag(drag, xToTime(localX(e)));
+      return;
+    }
     if (!scrubbing) return;
     const x = localX(e);
     if (Math.abs(x - downX) > 3) { moved = true; pendingClickBlock = -1; }
@@ -597,11 +618,13 @@ function wireTimelineInput() {
   });
   window.addEventListener('mouseup', () => {
     if (drag) {                                     // finalize resize, keep selection, autosave
-      const p = State.perfs[drag.i];
-      State.perfs.sort((a, b) => a.in - b.in);
-      State.selected = State.perfs.indexOf(p);
-      markDirty();
-      selectPerf(State.selected, { seek: false });
+      if (dragSnapped) {                            // only if it actually moved
+        const p = State.perfs[drag.i];
+        State.perfs.sort((a, b) => a.in - b.in);
+        State.selected = State.perfs.indexOf(p);
+        markDirty();
+        selectPerf(State.selected, { seek: false });
+      }
       drag = null;
       return;
     }
@@ -651,6 +674,38 @@ function renderPerfs() {
     };
     ol.appendChild(li);
   });
+}
+
+/* ----------------------------------------------------------------- undo */
+// Snapshot the editable state (performances + seed) BEFORE a mutation so it
+// can be restored. Call pushUndo() at the start of any edit.
+function pushUndo() {
+  State.undoStack.push({
+    perfs: State.perfs.map(p => ({ ...p })),
+    seed: State.seed,
+  });
+  if (State.undoStack.length > 100) State.undoStack.shift();
+  updateUndoBtn();
+}
+
+function undo() {
+  const snap = State.undoStack.pop();
+  if (!snap) return;
+  State.perfs = snap.perfs.map(p => ({ ...p }));
+  State.seed = snap.seed;
+  $('#seedInput').value = snap.seed;
+  State.selected = -1;
+  clearForm();
+  State.pendingIn = State.pendingOut = null;
+  refreshPending();
+  renderPerfs(); renderBlocks();
+  markDirty();                 // persist the reverted state
+  updateUndoBtn();
+}
+
+function updateUndoBtn() {
+  const b = $('#undoBtn');
+  if (b) b.disabled = State.undoStack.length === 0;
 }
 
 /* ----------------------------------------------------------------- save */
@@ -715,6 +770,12 @@ async function save({ auto = false } = {}) {
 /* ----------------------------------------------------------------- keys */
 function wireKeys() {
   window.addEventListener('keydown', (e) => {
+    // Undo works globally (incl. while typing), unless an input has a text
+    // selection/native-undo the user is actively editing.
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
+      const inField = ['INPUT', 'TEXTAREA'].includes(e.target.tagName);
+      if (!inField) { e.preventDefault(); undo(); return; }
+    }
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) {
       if (e.key === 'Enter' && e.target.id !== 'fTitle' && e.target.id !== 'fComposer') {} else return;
     }
