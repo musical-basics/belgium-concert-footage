@@ -44,14 +44,19 @@ def main():
     peak_max = max(float(peaks.max()), 1.0)
     peaks = np.clip(peaks / peak_max * 255.0, 0, 255).astype(np.uint8)
 
-    peaks.tofile(OUT_BIN)
+    # SR is rarely an exact multiple of PPS (22050/100 -> bucket 220 -> 100.23
+    # actual peaks/sec). Store the TRUE peaks-per-second and audio duration the
+    # binning produced, so the editor's `index = t * peaks_per_second` mapping
+    # stays aligned instead of drifting ~0.23%/sec (seconds off by the half hour).
+    actual_pps = SR / bucket
     with open(OUT_META, "w") as f:
         json.dump({
-            "peaks_per_second": PPS,
+            "peaks_per_second": actual_pps,
             "count": int(n),
-            "duration": n / PPS,
+            "duration": n / actual_pps,
             "sample_rate": SR,
         }, f)
+    peaks.tofile(OUT_BIN)
     print(f"wrote {n:,} peaks -> {OUT_BIN} ({os.path.getsize(OUT_BIN)/1e6:.1f} MB)")
     print("WAVEFORM DONE")
 
