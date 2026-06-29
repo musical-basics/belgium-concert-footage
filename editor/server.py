@@ -18,6 +18,7 @@ import re
 import sqlite3
 import sys
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -86,7 +87,28 @@ _SCHEMA = """
         in_s     REAL NOT NULL,
         out_s    REAL NOT NULL
     );
+    -- Each row is a full JSON snapshot of the project + all regions, taken
+    -- automatically every BACKUP_EVERY writes. `day` is the local YYYY-MM-DD
+    -- the snapshot was taken, used by the prune step to keep one-per-day.
+    CREATE TABLE IF NOT EXISTS region_backups (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT    NOT NULL,
+        day        TEXT    NOT NULL,
+        write_no   INTEGER NOT NULL,
+        n_regions  INTEGER NOT NULL,
+        payload    TEXT    NOT NULL
+    );
+    -- Singleton counter of total saves, so "every 5th write" survives restarts.
+    CREATE TABLE IF NOT EXISTS backup_state (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        write_count INTEGER NOT NULL DEFAULT 0
+    );
 """
+
+# Backup cadence + retention.
+BACKUP_EVERY = 5     # take a snapshot on every Nth save
+BACKUP_KEEP_RECENT = 100  # keep this many newest snapshots verbatim; older ones
+                          # collapse to one-per-day (the "eat its own tail" loop)
 
 
 def db_connect():
@@ -134,20 +156,89 @@ def _write_performances(conn, perfs):
     )
 
 
+def _load(conn):
+    """Read the full project payload (meta + performances) from an open conn."""
+    prow = conn.execute(
+        "SELECT seed, project, fps, duration, audio_source FROM project WHERE id = 1"
+    ).fetchone()
+    meta = dict(prow) if prow else dict(DEFAULT_PROJECT)
+    meta["performances"] = [
+        {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"]}
+        for r in conn.execute(
+            "SELECT title, composer, in_s, out_s FROM performances ORDER BY ordinal"
+        )
+    ]
+    return meta
+
+
 def db_load():
     with db_connect() as conn:
-        prow = conn.execute(
-            "SELECT seed, project, fps, duration, audio_source FROM project WHERE id = 1"
-        ).fetchone()
-        meta = dict(prow) if prow else dict(DEFAULT_PROJECT)
-        perfs = [
-            {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"]}
+        return _load(conn)
+
+
+def _bump_write_count(conn):
+    """Increment and return the persistent total-saves counter."""
+    conn.execute(
+        "INSERT INTO backup_state (id, write_count) VALUES (1, 1) "
+        "ON CONFLICT(id) DO UPDATE SET write_count = write_count + 1"
+    )
+    return conn.execute("SELECT write_count FROM backup_state WHERE id = 1").fetchone()[0]
+
+
+def _create_backup(conn, snapshot, write_no, now):
+    conn.execute(
+        "INSERT INTO region_backups (created_at, day, write_no, n_regions, payload) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (now.isoformat(timespec="seconds"), now.strftime("%Y-%m-%d"), write_no,
+         len(snapshot.get("performances", [])), json.dumps(snapshot)),
+    )
+
+
+def _prune_backups(conn):
+    """Self-healing retention: keep the newest BACKUP_KEEP_RECENT snapshots as-is,
+    then for everything older keep only the most recent snapshot per day (so write
+    days stay represented forever while the dense recent history is bounded)."""
+    rows = conn.execute(
+        "SELECT id, day FROM region_backups ORDER BY id DESC"
+    ).fetchall()
+    older = rows[BACKUP_KEEP_RECENT:]  # rows beyond the recent window, newest-first
+    seen_days, to_delete = set(), []
+    for r in older:
+        if r["day"] in seen_days:
+            to_delete.append(r["id"])      # a newer snapshot already represents this day
+        else:
+            seen_days.add(r["day"])        # keep this one as the day's survivor
+    if to_delete:
+        conn.executemany(
+            "DELETE FROM region_backups WHERE id = ?", [(i,) for i in to_delete]
+        )
+    return len(to_delete)
+
+
+def list_backups():
+    """Backup metadata, newest first (payload omitted to keep the list light)."""
+    with db_connect() as conn:
+        return [
+            {"id": r["id"], "created_at": r["created_at"], "day": r["day"],
+             "write_no": r["write_no"], "n_regions": r["n_regions"]}
             for r in conn.execute(
-                "SELECT title, composer, in_s, out_s FROM performances ORDER BY ordinal"
+                "SELECT id, created_at, day, write_no, n_regions "
+                "FROM region_backups ORDER BY id DESC"
             )
         ]
-    meta["performances"] = perfs
-    return meta
+
+
+def restore_backup(backup_id):
+    """Re-save the project from a stored snapshot. Goes through db_save so the
+    restore is itself mirrored to markers.json and counts as a normal write."""
+    with _DB_LOCK:
+        with db_connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM region_backups WHERE id = ?", (backup_id,)
+            ).fetchone()
+        if row is None:
+            return None
+    return db_save(json.loads(row["payload"]))
 
 
 def db_save(data):
@@ -164,6 +255,12 @@ def db_save(data):
                  data.get("duration"), data.get("audio_source")),
             )
             _write_performances(conn, data.get("performances", []))
+            # Snapshot every Nth write, then trim per the retention policy. Done
+            # inside the same transaction so a backup never reflects half a save.
+            count = _bump_write_count(conn)
+            if count % BACKUP_EVERY == 0:
+                _create_backup(conn, _load(conn), count, datetime.now())
+                _prune_backups(conn)
         # Mirror the canonical view back out for the render pipeline.
         mirror = db_load()
         tmp = MARKERS_PATH + ".tmp"
@@ -256,6 +353,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(self._meta())
         if path == "/api/markers":
             return self._send_json(self._load_markers())
+        if path == "/api/backups":
+            return self._send_json({"backups": list_backups()})
         if path == "/api/waveform":
             if os.path.isfile(WAVE_META) and os.path.isfile(WAVE_BIN):
                 with open(WAVE_META) as f:
@@ -301,6 +400,17 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 500)
             return self._send_json({"ok": True, "saved": DB_PATH})
+        if path == "/api/backups/restore":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                backup_id = int(json.loads(raw.decode("utf-8")).get("id"))
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            restored = restore_backup(backup_id)
+            if restored is None:
+                return self._send_json({"ok": False, "error": "no such backup"}, 404)
+            return self._send_json({"ok": True, "restored": restored})
         self.send_error(404, "Not found")
 
     # ---- data --------------------------------------------------------
