@@ -38,7 +38,7 @@ SOURCES = {
     "livestream": "Main Footage/Livestream Footage.mov",
     "piano": "Main Footage/camera next to piano.mov",
 }
-W, H, FPS = 1280, 720, 60
+W, H, FPS = 1920, 1080, 60
 
 
 def src_path(cam):
