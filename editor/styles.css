@@ -108,6 +108,35 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 #perfList li .rowbtns button { padding: 2px 8px; font-size: 11px; }
 #perfList li .rowbtns button.danger { padding: 2px 7px; }
 
+/* ---- caption transcript (below the timeline) ---- */
+#transcriptWrap {
+  display: flex; flex-direction: column; min-height: 0;
+  flex: 1 1 34%;                 /* shares remaining height with #panel */
+}
+#trbar { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+#trbar h3 { margin: 0; font-size: 13px; }
+.trstatus { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.trfollow { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 4px; }
+#trSearch { width: 200px; padding: 3px 8px; font-size: 12px; }
+.transcript {
+  flex: 1; overflow: auto; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px;
+}
+.trline {
+  display: flex; gap: 10px; padding: 3px 8px; border-radius: 6px;
+  cursor: pointer; scroll-margin: 8px;
+}
+.trline:hover { background: var(--panel2); }
+.trline .trtc {
+  color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px;
+  min-width: 52px; text-align: right; flex-shrink: 0; user-select: none;
+}
+.trline .trtext { flex: 1; }
+.trline.active { background: rgba(79,140,255,0.16); }
+.trline.active .trtc { color: var(--accent); font-weight: 700; }
+.trline.active .trtext { color: #fff; }
+.trempty { color: var(--muted); padding: 14px; text-align: center; }
+
 #help { padding: 6px 14px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); background: var(--panel); }
 #help b { color: var(--text); }
 .flash { animation: flash .5s; }

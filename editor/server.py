@@ -28,6 +28,7 @@ MARKERS_PATH = os.path.join(ROOT, "markers.json")  # JSON mirror for the render 
 META_PATH = os.path.join(ROOT, "cache", "clips_meta.json")
 WAVE_BIN = os.path.join(ROOT, "cache", "waveform.u8")
 WAVE_META = os.path.join(ROOT, "cache", "waveform.json")
+TRANSCRIPT_PATH = os.path.join(ROOT, "cache", "transcript.json")
 
 PORT = int(os.environ.get("EDITOR_PORT", "8000"))
 
@@ -264,6 +265,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ready": False})
         if path == "/waveform.u8":
             return self._serve_file(WAVE_BIN)
+        if path == "/api/transcript":
+            # Time-coded caption transcript. Grows as transcribe.py finishes
+            # each of its 10 chunks; "ready" stays False until the file exists.
+            if os.path.isfile(TRANSCRIPT_PATH):
+                with open(TRANSCRIPT_PATH) as f:
+                    data = json.load(f)
+                data["ready"] = True
+                return self._send_json(data)
+            return self._send_json({"ready": False, "segments": []})
         if path.startswith("/proxies/"):
             name = os.path.basename(path)
             return self._serve_file(os.path.join(PROXY_DIR, name))

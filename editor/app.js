@@ -34,6 +34,7 @@ const State = {
   seed: 42,
   dirty: false,
   undoStack: [],       // snapshots of perfs/seed taken before each edit
+  transcript: { ready: false, segments: [], activeIdx: -1 },
   view: { start: 0, span: 0 },     // visible window of the main timeline (seconds)
   wave: { ready: false, peaks: null, pps: 100, duration: 0 },
   tl: {},                          // canvas refs / offscreen cache
@@ -64,6 +65,8 @@ async function boot() {
 
   initTimeline();
   loadWaveform();
+  loadTranscript();
+  wireTranscript();
 
   wireTransport();
   wireForm();
@@ -189,6 +192,7 @@ function tickLoop() {
     keepPlayheadInView(t);
   }
   drawTimeline(t);
+  updateTranscriptHighlight(t);
   requestAnimationFrame(tickLoop);
 }
 
@@ -674,6 +678,96 @@ function renderPerfs() {
     };
     ol.appendChild(li);
   });
+}
+
+/* ----------------------------------------------------- caption transcript */
+// The transcript is produced by tools/transcribe.py in 10 chunk passes and
+// re-merged after each one, so cache/transcript.json grows while the editor is
+// open. We poll until the segment count stops changing (transcription done).
+let _trPollStable = 0, _trLastCount = -1;
+
+async function loadTranscript() {
+  const data = await fetch('/api/transcript').then(r => r.json()).catch(() => ({ ready: false }));
+  const segs = data.segments || [];
+  const status = $('#transcriptStatus');
+
+  if (segs.length !== State.transcript.segments.length) {
+    State.transcript.segments = segs;
+    State.transcript.ready = !!data.ready;
+    State.transcript.activeIdx = -1;
+    renderTranscript();
+  }
+
+  const done = data.ready && segs.length === _trLastCount;
+  _trPollStable = done ? _trPollStable + 1 : 0;
+  _trLastCount = segs.length;
+
+  if (!data.ready) {
+    status.textContent = '⏳ transcribing…';
+  } else if (_trPollStable < 3) {
+    status.textContent = `${segs.length} lines · transcribing…`;
+  } else {
+    status.textContent = `${segs.length} lines`;
+    return;                                 // stable -> stop polling
+  }
+  setTimeout(loadTranscript, 6000);
+}
+
+function renderTranscript() {
+  const box = $('#transcript');
+  const segs = State.transcript.segments;
+  if (!segs.length) {
+    box.innerHTML = '<div class="trempty">No transcript yet — generating from the Back Camera audio…</div>';
+    return;
+  }
+  const q = ($('#trSearch').value || '').trim().toLowerCase();
+  box.innerHTML = '';
+  segs.forEach((s, i) => {
+    if (q && !s.text.toLowerCase().includes(q)) return;
+    const line = document.createElement('div');
+    line.className = 'trline';
+    line.dataset.i = i;
+    line.innerHTML =
+      `<span class="trtc">${fmtClock(s.start)}</span>` +
+      `<span class="trtext">${escapeHtml(s.text)}</span>`;
+    line.onclick = () => { seekAll(s.start); focusRange(s.start, s.end); };
+    box.appendChild(line);
+  });
+  State.transcript.activeIdx = -1;          // force re-highlight next tick
+}
+
+// Binary-search the segment covering time t (segments are sorted by start).
+function transcriptIndexAt(t) {
+  const segs = State.transcript.segments;
+  let lo = 0, hi = segs.length - 1, hit = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (segs[mid].start <= t) { hit = mid; lo = mid + 1; } else { hi = mid - 1; }
+  }
+  if (hit >= 0 && t <= segs[hit].end + 0.25) return hit;   // small tail grace
+  return -1;
+}
+
+function updateTranscriptHighlight(t) {
+  const tr = State.transcript;
+  if (!tr.segments.length) return;
+  const idx = transcriptIndexAt(t);
+  if (idx === tr.activeIdx) return;
+  const box = $('#transcript');
+  const prev = box.querySelector('.trline.active');
+  if (prev) prev.classList.remove('active');
+  tr.activeIdx = idx;
+  if (idx < 0) return;
+  const el = box.querySelector(`.trline[data-i="${idx}"]`);
+  if (!el) return;                          // filtered out by search
+  el.classList.add('active');
+  if ($('#trFollow').checked) {
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function wireTranscript() {
+  $('#trSearch').addEventListener('input', renderTranscript);
 }
 
 /* ----------------------------------------------------------------- undo */
