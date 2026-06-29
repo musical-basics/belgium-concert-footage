@@ -293,7 +293,8 @@ function clearForm(keepSel) {
   $('#formDelete').hidden = State.selected < 0;
 }
 
-function selectPerf(idx) {
+function selectPerf(idx, opts = {}) {
+  const { seek = true } = opts;            // timeline clicks select without moving playhead
   State.selected = idx;
   const p = State.perfs[idx];
   $('#fTitle').value = p.title || '';
@@ -302,8 +303,7 @@ function selectPerf(idx) {
   $('#formTitle').textContent = `Edit #${idx+1}`;
   $('#formDelete').hidden = false;
   renderPerfs(); renderBlocks();
-  focusRange(p.in, p.out);
-  seekAll(p.in);
+  if (seek) { focusRange(p.in, p.out); seekAll(p.in); }
 }
 
 function deletePerf(idx) {
@@ -465,10 +465,19 @@ function rebuildStatic() {
     ctx.strokeStyle = sel ? '#34d399' : '#4f8cff';
     ctx.lineWidth = sel ? 2 : 1;
     ctx.strokeRect(x0 + 0.5, 14.5, x1 - x0 - 1, t.h - 15);
+    // in/out drag handles (grips on each edge)
+    const hw = 3, grip = sel ? '#34d399' : '#7aa6ff';
+    ctx.fillStyle = grip;
+    ctx.fillRect(x0, 14, hw, t.h - 14);
+    ctx.fillRect(x1 - hw, 14, hw, t.h - 14);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1;
+    for (const hx of [x0 + hw / 2, x1 - hw / 2]) {
+      ctx.beginPath(); ctx.moveTo(hx + 0.5, 18); ctx.lineTo(hx + 0.5, t.h - 4); ctx.stroke();
+    }
     ctx.fillStyle = sel ? '#d6ffe9' : '#cfe0ff';
     ctx.save();
-    ctx.beginPath(); ctx.rect(x0 + 2, 14, Math.max(0, x1 - x0 - 4), t.h - 14); ctx.clip();
-    ctx.fillText(`${i + 1}. ${p.title}`, x0 + 4, 26);
+    ctx.beginPath(); ctx.rect(x0 + hw + 2, 14, Math.max(0, x1 - x0 - 2 * hw - 4), t.h - 14); ctx.clip();
+    ctx.fillText(`${i + 1}. ${p.title}`, x0 + hw + 4, 26);
     ctx.restore();
   });
 
@@ -528,6 +537,31 @@ function blockHit(x, y) {
   return -1;
 }
 
+const HANDLE_TOL = 6;   // px tolerance for grabbing a region edge
+const MIN_LEN = 0.1;    // shortest allowed region (seconds)
+
+// Is the cursor over an in/out drag handle? Returns { i, edge } or null.
+function handleHit(x, y) {
+  if (y < 14) return null;
+  for (let i = State.perfs.length - 1; i >= 0; i--) {
+    const p = State.perfs[i];
+    if (Math.abs(x - timeToX(p.in))  <= HANDLE_TOL) return { i, edge: 'in' };
+    if (Math.abs(x - timeToX(p.out)) <= HANDLE_TOL) return { i, edge: 'out' };
+  }
+  return null;
+}
+
+// Live-adjust a region edge while dragging its handle.
+function applyHandleDrag(drag, tm) {
+  const p = State.perfs[drag.i];
+  tm = Math.max(0, Math.min(State.duration, +tm.toFixed(3)));
+  if (drag.edge === 'in') p.in = Math.min(tm, p.out - MIN_LEN);
+  else                    p.out = Math.max(tm, p.in + MIN_LEN);
+  seekAll(drag.edge === 'in' ? p.in : p.out);   // playhead follows the edge
+  if (State.selected === drag.i) { $('#fIn').value = p.in; $('#fOut').value = p.out; }
+  renderPerfs(); markFullDirty();
+}
+
 function wireTimelineInput() {
   const t = State.tl;
   t.wave.addEventListener('wheel', (e) => {
@@ -537,24 +571,48 @@ function wireTimelineInput() {
   }, { passive: false });
 
   let scrubbing = false, downX = 0, moved = false;
+  let drag = null;                                  // { i, edge } while resizing a region
+  const localX = (e) => e.clientX - t.wave.getBoundingClientRect().left;
+
   t.wave.addEventListener('mousedown', (e) => {
     const r = t.wave.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
     downX = x; moved = false;
+    const h = handleHit(x, y);
+    if (h) {                                        // grab an edge -> resize, don't scrub
+      drag = h;
+      selectPerf(h.i, { seek: false });
+      return;
+    }
     pendingClickBlock = blockHit(x, y);
     scrubbing = true;
     seekAll(xToTime(x));
   });
   window.addEventListener('mousemove', (e) => {
+    if (drag) { applyHandleDrag(drag, xToTime(localX(e))); return; }
     if (!scrubbing) return;
-    const r = t.wave.getBoundingClientRect();
-    const x = e.clientX - r.left;
+    const x = localX(e);
     if (Math.abs(x - downX) > 3) { moved = true; pendingClickBlock = -1; }
     seekAll(xToTime(x));
   });
   window.addEventListener('mouseup', () => {
-    if (scrubbing && !moved && pendingClickBlock >= 0) selectPerf(pendingClickBlock);
+    if (drag) {                                     // finalize resize, keep selection, autosave
+      const p = State.perfs[drag.i];
+      State.perfs.sort((a, b) => a.in - b.in);
+      State.selected = State.perfs.indexOf(p);
+      markDirty();
+      selectPerf(State.selected, { seek: false });
+      drag = null;
+      return;
+    }
+    if (scrubbing && !moved && pendingClickBlock >= 0) selectPerf(pendingClickBlock, { seek: false });
     scrubbing = false; pendingClickBlock = -1;
+  });
+  // cursor hint when hovering an edge handle
+  t.wave.addEventListener('mousemove', (e) => {
+    if (drag || scrubbing) return;
+    const r = t.wave.getBoundingClientRect();
+    t.wave.style.cursor = handleHit(e.clientX - r.left, e.clientY - r.top) ? 'ew-resize' : 'default';
   });
 
   let panning = false;
