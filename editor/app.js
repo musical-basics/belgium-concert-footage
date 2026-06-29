@@ -244,14 +244,32 @@ function refreshPending() {
 }
 
 /* ----------------------------------------------------------------- form */
+// Mirror the form's In/Out fields onto the timeline as the pending (orange)
+// preview region, so a marker shows up immediately while building a new
+// performance — same feedback as the Mark In / Mark Out buttons.
+function syncPendingFromForm() {
+  const i = parseFloat($('#fIn').value);
+  const o = parseFloat($('#fOut').value);
+  State.pendingIn = isFinite(i) ? i : null;
+  State.pendingOut = isFinite(o) ? o : null;
+  refreshPending();
+}
+
 function wireForm() {
   $('#formSave').onclick = saveForm;
-  $('#formCancel').onclick = clearForm;
+  $('#formCancel').onclick = () => {
+    clearForm();
+    State.pendingIn = State.pendingOut = null;   // also drop the preview marker
+    refreshPending();
+  };
   $('#formDelete').onclick = deleteSelected;
+  $('#fIn').addEventListener('input', syncPendingFromForm);
+  $('#fOut').addEventListener('input', syncPendingFromForm);
   document.querySelectorAll('[data-grab]').forEach(b => {
     b.onclick = () => {
       const t = +State.master.currentTime.toFixed(3);
       if (b.dataset.grab === 'in') $('#fIn').value = t; else $('#fOut').value = t;
+      syncPendingFromForm();                       // reflect the grab on the waveform
     };
   });
   $('#seedInput').onchange = () => { State.seed = Number($('#seedInput').value) || 42; markDirty(); };
