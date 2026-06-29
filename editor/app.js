@@ -768,6 +768,16 @@ function updateTranscriptHighlight(t) {
 
 function wireTranscript() {
   $('#trSearch').addEventListener('input', renderTranscript);
+  const wrap = $('#transcriptWrap'), btn = $('#trToggle');
+  const setCollapsed = (on) => {
+    wrap.classList.toggle('collapsed', on);
+    btn.title = on ? 'Show transcript' : 'Hide transcript';
+    try { localStorage.setItem('transcriptCollapsed', on ? '1' : '0'); } catch (e) {}
+  };
+  btn.onclick = () => setCollapsed(!wrap.classList.contains('collapsed'));
+  let saved = '0';
+  try { saved = localStorage.getItem('transcriptCollapsed') || '0'; } catch (e) {}
+  setCollapsed(saved === '1');
 }
 
 /* ----------------------------------------------------------------- undo */

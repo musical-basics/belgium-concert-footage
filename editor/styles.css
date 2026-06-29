@@ -113,6 +113,15 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
   display: flex; flex-direction: column; min-height: 0;
   flex: 1 1 34%;                 /* shares remaining height with #panel */
 }
+#transcriptWrap.collapsed {
+  flex: 0 0 auto;                /* give all height back to #panel */
+}
+#transcriptWrap.collapsed .transcript { display: none; }
+#transcriptWrap.collapsed #trbar { margin-bottom: 0; }
+.trtoggle {
+  padding: 1px 7px; font-size: 12px; line-height: 1.2; flex-shrink: 0;
+}
+#transcriptWrap.collapsed .trtoggle { transform: rotate(-90deg); }
 #trbar { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 #trbar h3 { margin: 0; font-size: 13px; }
 .trstatus { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
