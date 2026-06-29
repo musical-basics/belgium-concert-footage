@@ -981,6 +981,12 @@ function wireKeys() {
       const inField = ['INPUT', 'TEXTAREA'].includes(e.target.tagName);
       if (!inField) { e.preventDefault(); undo(); return; }
     }
+    // ⌘S / Ctrl+S saves like any other app — works globally, even mid-edit.
+    if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault();
+      save();
+      return;
+    }
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) {
       if (e.key === 'Enter' && e.target.id !== 'fTitle' && e.target.id !== 'fComposer') {} else return;
     }
