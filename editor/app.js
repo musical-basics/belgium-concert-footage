@@ -35,6 +35,7 @@ const State = {
   selectedTitle: -1,
   titleOverlays: [],   // per-camera-pane preview overlays [{box,block,main,sub,video}]
   previewTitle: null,  // the title currently shown in the preview (for drag)
+  snap: { x: false, y: false },   // center-lock guides active on each axis (while dragging)
   seed: 42,
   dirty: false,
   undoStack: [],       // snapshots of perfs/seed taken before each edit
@@ -168,7 +169,9 @@ function buildVideos() {
     const box = document.createElement('div');
     box.className = 'title-overlay';
     box.hidden = true;
-    box.innerHTML = '<div class="to-block"><div class="to-main"></div><div class="to-sub"></div></div>';
+    box.innerHTML =
+      '<div class="snap-line snap-v"></div><div class="snap-line snap-h"></div>' +
+      '<div class="to-block"><div class="to-main"></div><div class="to-sub"></div></div>';
     wrap.appendChild(box);
     const block = box.querySelector('.to-block');
     const ov = { box, block, main: box.querySelector('.to-main'), sub: box.querySelector('.to-sub'), video: vid };
@@ -221,6 +224,8 @@ function updateTitleOverlay(t) {
     ov.sub.style.fontSize = (fr.fH / 27) + 'px';
     ov.block.style.left = (cx * 100) + '%';
     ov.block.style.top = (cy * 100) + '%';
+    ov.box.classList.toggle('snap-x', State.snap.x);
+    ov.box.classList.toggle('snap-y', State.snap.y);
     if (ov.box.hidden) ov.box.hidden = false;
   }
 }
@@ -234,18 +239,29 @@ function startTitlePosDrag(e, ov) {
   const idx = State.titles.indexOf(State.previewTitle);
   if (idx >= 0) selectTitle(idx, { seek: false });
 }
+const SNAP_TOL = 0.015;   // center-lock pull radius (fraction of frame); Shift disables
 function wireTitlePosDrag() {
   window.addEventListener('mousemove', (e) => {
     if (!_posDrag || !State.previewTitle) return;
     if (!_posDrag.snapped) { pushUndo(); _posDrag.snapped = true; }
     const r = _posDrag.box.getBoundingClientRect();
-    const cx = (e.clientX - r.left) / r.width;
-    const cy = (e.clientY - r.top) / r.height;
-    State.previewTitle.x = Math.max(0, Math.min(1, +cx.toFixed(4)));
-    State.previewTitle.y = Math.max(0, Math.min(1, +cy.toFixed(4)));
+    let cx = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    let cy = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height));
+    // Center-lock (FCP-style): snap to the frame's centre line on each axis and
+    // show a guide; holding Shift disables snapping for free placement.
+    let sx = false, sy = false;
+    if (!e.shiftKey) {
+      if (Math.abs(cx - 0.5) <= SNAP_TOL) { cx = 0.5; sx = true; }
+      if (Math.abs(cy - 0.5) <= SNAP_TOL) { cy = 0.5; sy = true; }
+    }
+    State.snap = { x: sx, y: sy };
+    State.previewTitle.x = +cx.toFixed(4);
+    State.previewTitle.y = +cy.toFixed(4);
     markDirty();
   });
-  window.addEventListener('mouseup', () => { if (_posDrag) { _posDrag = null; renderTitles(); } });
+  window.addEventListener('mouseup', () => {
+    if (_posDrag) { _posDrag = null; State.snap = { x: false, y: false }; renderTitles(); }
+  });
 }
 
 function buildAudioSelect() {

@@ -55,6 +55,12 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
   position: absolute; z-index: 4; overflow: hidden; pointer-events: none;
 }
 .title-overlay[hidden] { display: none; }
+/* center-lock guides (shown while dragging when snapped to a centre line) */
+.title-overlay .snap-line { position: absolute; background: #f5c518; pointer-events: none; display: none; }
+.title-overlay .snap-v { top: 0; bottom: 0; left: 50%; width: 1px; transform: translateX(-0.5px); }
+.title-overlay .snap-h { left: 0; right: 0; top: 50%; height: 1px; transform: translateY(-0.5px); }
+.title-overlay.snap-x .snap-v { display: block; }
+.title-overlay.snap-y .snap-h { display: block; }
 /* the draggable text block, centred on the title's (x, y) */
 .title-overlay .to-block {
   position: absolute; transform: translate(-50%, -50%);
