@@ -38,6 +38,14 @@ SOURCES = {
     "livestream": "Main Footage/Livestream Footage.mov",
     "piano": "Main Footage/camera next to piano.mov",
 }
+
+# Final audio bed muxed into every export: the mixed/mastered edit that fully
+# replaces the camera scratch audio. Same length & timeline as the clips, used
+# at face-value alignment (file 0:00 == concert 0:00), so each performance is
+# cut from the same [t_in, t_out] window. Cut *detection* still reads the camera
+# bed, so the visual edit is unchanged. Falls back to the camera if absent.
+AUDIO_BED = os.path.join(ROOT, "Audio Edit Belgium Concert Highlights.wav")
+
 W, H, FPS = 1920, 1080, 60
 
 # Font used to burn in the on-screen titles (drawtext). Any .ttf on the box.
@@ -195,8 +203,9 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=()):
          "-f", "concat", "-safe", "0", "-i", listfile, "-c", "copy", video_only])
 
     audio_only = os.path.join(seg_dir, "audio.m4a")
+    audio_src = AUDIO_BED if os.path.isfile(AUDIO_BED) else src_path(audio_cam)
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-         "-ss", f"{t_in:.3f}", "-i", src_path(audio_cam), "-t", f"{t_out-t_in:.3f}",
+         "-ss", f"{t_in:.3f}", "-i", audio_src, "-t", f"{t_out-t_in:.3f}",
          "-vn", "-c:a", "aac", "-b:a", "256k", "-ar", "48000", audio_only])
 
     out_path = os.path.join(OUT_DIR, name + ".mp4")
