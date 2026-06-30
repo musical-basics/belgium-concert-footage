@@ -31,9 +31,10 @@ const State = {
   pendingOut: null,
   perfs: [],
   selected: -1,
-  titles: [],          // on-screen text overlays {text, subtitle, in, out}
+  titles: [],          // on-screen text overlays {text, subtitle, in, out, x, y}
   selectedTitle: -1,
-  titleOverlay: null,  // DOM node for the live WYSIWYG title preview
+  titleOverlays: [],   // per-camera-pane preview overlays [{box,block,main,sub,video}]
+  previewTitle: null,  // the title currently shown in the preview (for drag)
   seed: 42,
   dirty: false,
   undoStack: [],       // snapshots of perfs/seed taken before each edit
@@ -59,6 +60,9 @@ const PERF_Y0 = TICK_H + TITLE_LANE_H;
 // line breaks are identical to the burned-in render.
 const TITLE_MAIN_MAX_CHARS = 40;
 const TITLE_SUB_MAX_CHARS = 56;
+// Default normalized title position (centre of the block) — must match render.py.
+const TITLE_DEF_X = 0.5;
+const TITLE_DEF_Y = 0.80;
 function wrapText(s, max) {
   const lines = []; let cur = '';
   for (const w of (s || '').split(/\s+/).filter(Boolean)) {
@@ -156,44 +160,92 @@ function buildVideos() {
   });
   if (!State.master) State.master = State.videos[0];
 
-  // Live title preview: a lower-third overlaid on the video area, shown while
-  // the playhead is inside a title's window — a WYSIWYG of the burned-in render.
-  const ov = document.createElement('div');
-  ov.id = 'titleOverlay';
-  ov.className = 'title-overlay';
-  ov.hidden = true;
-  ov.innerHTML = '<div class="to-main"></div><div class="to-sub"></div>';
-  wrap.appendChild(ov);
-  State.titleOverlay = ov;
+  // Live title preview: one overlay per camera pane, each sized to that pane's
+  // true 16:9 frame rect so it's a WYSIWYG of the burned-in render. The title
+  // block inside is draggable to set the title's normalized (x, y) position.
+  State.titleOverlays = [];
+  State.videos.forEach((vid) => {
+    const box = document.createElement('div');
+    box.className = 'title-overlay';
+    box.hidden = true;
+    box.innerHTML = '<div class="to-block"><div class="to-main"></div><div class="to-sub"></div></div>';
+    wrap.appendChild(box);
+    const block = box.querySelector('.to-block');
+    const ov = { box, block, main: box.querySelector('.to-main'), sub: box.querySelector('.to-sub'), video: vid };
+    block.addEventListener('mousedown', (e) => startTitlePosDrag(e, ov));
+    State.titleOverlays.push(ov);
+  });
+  wireTitlePosDrag();
 }
 
-// Mirror the burned-in render: show whichever title covers the playhead, sized
-// relative to the video area (render uses fontsize h/16 + h/27) with a matching
-// 0.4 s opacity fade in/out.
+// The 16:9 frame rect (px, relative to #videos) inside a letterboxed <video>.
+function frameRectOf(vid, wrap) {
+  const vr = vid.getBoundingClientRect(), wr = wrap.getBoundingClientRect();
+  const TW = vr.width, TH = vr.height, fa = 16 / 9;
+  let fW, fH;
+  if (TW / TH > fa) { fH = TH; fW = TH * fa; } else { fW = TW; fH = TW / fa; }
+  return { left: (vr.left - wr.left) + (TW - fW) / 2, top: (vr.top - wr.top) + (TH - fH) / 2, fW, fH };
+}
+
+// Mirror the burned-in render on every pane: show whichever title covers the
+// playhead, sized/positioned to each pane's frame (fontsize fH/16 + fH/27,
+// block centred on the title's x/y) with the same 0.4 s opacity fade.
 function updateTitleOverlay(t) {
-  const ov = State.titleOverlay;
-  if (!ov) return;
+  const ovs = State.titleOverlays;
+  if (!ovs || !ovs.length) return;
   let active = null;
-  for (const tt of State.titles) if (t >= tt.in && t <= tt.out) active = tt;  // topmost wins
-  if (!active || !((active.text || '').trim() || (active.subtitle || '').trim())) {
-    if (!ov.hidden) ov.hidden = true;
-    return;
-  }
-  const main = ov.querySelector('.to-main'), sub = ov.querySelector('.to-sub');
-  // Wrap with the SAME limits the render uses so the preview matches the burn-in.
-  main.textContent = wrapText(active.text || '', TITLE_MAIN_MAX_CHARS);
-  main.style.display = (active.text || '').trim() ? '' : 'none';
-  sub.textContent = wrapText(active.subtitle || '', TITLE_SUB_MAX_CHARS);
-  sub.style.display = (active.subtitle || '').trim() ? '' : 'none';
-  const h = $('#videos').clientHeight || 240;
-  main.style.fontSize = Math.round(h / 16) + 'px';
-  sub.style.fontSize = Math.round(h / 27) + 'px';
-  const fd = Math.min(0.4, Math.max(0.05, (active.out - active.in) / 2));
+  for (const tt of State.titles) if (t >= tt.in && t <= tt.out) active = tt;   // topmost wins
+  const has = !!active && !!((active.text || '').trim() || (active.subtitle || '').trim());
+  State.previewTitle = has ? active : null;
+  const wrap = $('#videos');
+  const fd = has ? Math.min(0.4, Math.max(0.05, (active.out - active.in) / 2)) : 0;
   let op = 1;
-  if (t < active.in + fd) op = (t - active.in) / fd;
-  else if (t > active.out - fd) op = (active.out - t) / fd;
-  ov.style.opacity = Math.max(0, Math.min(1, op)).toFixed(2);
-  if (ov.hidden) ov.hidden = false;
+  if (has) {
+    if (t < active.in + fd) op = (t - active.in) / fd;
+    else if (t > active.out - fd) op = (active.out - t) / fd;
+    op = Math.max(0, Math.min(1, op));
+  }
+  const cx = has ? (active.x == null ? TITLE_DEF_X : active.x) : 0;
+  const cy = has ? (active.y == null ? TITLE_DEF_Y : active.y) : 0;
+  for (const ov of ovs) {
+    if (!has) { if (!ov.box.hidden) ov.box.hidden = true; continue; }
+    const fr = frameRectOf(ov.video, wrap);
+    ov.box.style.left = fr.left + 'px'; ov.box.style.top = fr.top + 'px';
+    ov.box.style.width = fr.fW + 'px'; ov.box.style.height = fr.fH + 'px';
+    ov.box.style.opacity = op.toFixed(2);
+    ov.main.textContent = wrapText(active.text || '', TITLE_MAIN_MAX_CHARS);
+    ov.main.style.display = (active.text || '').trim() ? '' : 'none';
+    ov.sub.textContent = wrapText(active.subtitle || '', TITLE_SUB_MAX_CHARS);
+    ov.sub.style.display = (active.subtitle || '').trim() ? '' : 'none';
+    ov.main.style.fontSize = (fr.fH / 16) + 'px';
+    ov.sub.style.fontSize = (fr.fH / 27) + 'px';
+    ov.block.style.left = (cx * 100) + '%';
+    ov.block.style.top = (cy * 100) + '%';
+    if (ov.box.hidden) ov.box.hidden = false;
+  }
+}
+
+// Drag the title block on any pane to set the active title's normalized x/y.
+let _posDrag = null;     // { box } of the pane being dragged on
+function startTitlePosDrag(e, ov) {
+  if (!State.previewTitle) return;
+  e.preventDefault(); e.stopPropagation();
+  _posDrag = { box: ov.box, snapped: false };
+  const idx = State.titles.indexOf(State.previewTitle);
+  if (idx >= 0) selectTitle(idx, { seek: false });
+}
+function wireTitlePosDrag() {
+  window.addEventListener('mousemove', (e) => {
+    if (!_posDrag || !State.previewTitle) return;
+    if (!_posDrag.snapped) { pushUndo(); _posDrag.snapped = true; }
+    const r = _posDrag.box.getBoundingClientRect();
+    const cx = (e.clientX - r.left) / r.width;
+    const cy = (e.clientY - r.top) / r.height;
+    State.previewTitle.x = Math.max(0, Math.min(1, +cx.toFixed(4)));
+    State.previewTitle.y = Math.max(0, Math.min(1, +cy.toFixed(4)));
+    markDirty();
+  });
+  window.addEventListener('mouseup', () => { if (_posDrag) { _posDrag = null; renderTitles(); } });
 }
 
 function buildAudioSelect() {
@@ -493,6 +545,7 @@ function renderTitles() {
         <span class="ttime">${fmtTC(t.in)} → ${fmtTC(t.out)} · ${fmtDur(t.out - t.in)}</span>
       </span>
       <span class="rowbtns">
+        <button class="small" data-act="center" title="Recenter (reset position)">⌖</button>
         <button class="small danger" data-act="del" title="Delete">✕</button>
       </span>`;
     const [txt, sub] = li.querySelectorAll('.ttext');
@@ -504,6 +557,10 @@ function renderTitles() {
     // update the model, redraw the timeline label, and autosave.
     txt.addEventListener('input', () => { t.text = txt.value; markDirty(); markFullDirty(); });
     sub.addEventListener('input', () => { t.subtitle = sub.value; markDirty(); });
+    li.querySelector('[data-act=center]').onclick = (e) => {
+      e.stopPropagation(); pushUndo();
+      t.x = TITLE_DEF_X; t.y = TITLE_DEF_Y; markDirty();
+    };
     li.querySelector('[data-act=del]').onclick = (e) => { e.stopPropagation(); deleteTitle(i); };
     ol.appendChild(li);
   });
@@ -1123,6 +1180,7 @@ async function save({ auto = false } = {}) {
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,
+      x: t.x == null ? null : t.x, y: t.y == null ? null : t.y,
     })),
   };
   _saveInFlight = true;
@@ -1295,6 +1353,7 @@ window.addEventListener('beforeunload', (e) => {
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,
+      x: t.x == null ? null : t.x, y: t.y == null ? null : t.y,
     })),
   };
   navigator.sendBeacon('/api/markers', new Blob([JSON.stringify(payload)], { type: 'application/json' }));

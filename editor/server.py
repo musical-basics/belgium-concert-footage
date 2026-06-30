@@ -96,7 +96,9 @@ _SCHEMA = """
         text     TEXT,
         subtitle TEXT,
         in_s     REAL NOT NULL,
-        out_s    REAL NOT NULL
+        out_s    REAL NOT NULL,
+        x_pos    REAL,
+        y_pos    REAL
     );
     -- Each row is a full JSON snapshot of the project + all regions, taken
     -- automatically every BACKUP_EVERY writes. `day` is the local YYYY-MM-DD
@@ -129,6 +131,11 @@ def db_connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    # Migrate older DBs whose titles table predates the x/y position columns.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(titles)")}
+    for col in ("x_pos", "y_pos"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE titles ADD COLUMN {col} REAL")
     return conn
 
 
@@ -172,9 +179,10 @@ def _write_performances(conn, perfs):
 def _write_titles(conn, titles):
     conn.execute("DELETE FROM titles")
     conn.executemany(
-        "INSERT INTO titles (ordinal, text, subtitle, in_s, out_s) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [(i, t.get("text"), t.get("subtitle"), t.get("in"), t.get("out"))
+        "INSERT INTO titles (ordinal, text, subtitle, in_s, out_s, x_pos, y_pos) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(i, t.get("text"), t.get("subtitle"), t.get("in"), t.get("out"),
+          t.get("x"), t.get("y"))
          for i, t in enumerate(titles)],
     )
 
@@ -192,9 +200,10 @@ def _load(conn):
         )
     ]
     meta["titles"] = [
-        {"text": r["text"], "subtitle": r["subtitle"], "in": r["in_s"], "out": r["out_s"]}
+        {"text": r["text"], "subtitle": r["subtitle"], "in": r["in_s"], "out": r["out_s"],
+         "x": r["x_pos"], "y": r["y_pos"]}
         for r in conn.execute(
-            "SELECT text, subtitle, in_s, out_s FROM titles ORDER BY ordinal"
+            "SELECT text, subtitle, in_s, out_s, x_pos, y_pos FROM titles ORDER BY ordinal"
         )
     ]
     return meta

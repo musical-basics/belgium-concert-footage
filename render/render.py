@@ -107,6 +107,11 @@ def _fade_alpha(a, b, fd):
 TITLE_MAIN_MAX_CHARS = 40
 TITLE_SUB_MAX_CHARS = 56
 
+# Default normalized position (centre of the text block) when a title has no
+# explicit x/y — horizontally centred, lower third. Editor uses the same values.
+TITLE_DEF_X = 0.5
+TITLE_DEF_Y = 0.80
+
 
 def _wrap(text, max_chars):
     """Greedy word-wrap into lines no longer than max_chars (a word longer than
@@ -128,10 +133,11 @@ def title_filter(perf_titles, t_in, t_out, work_dir):
 
     Times in markers are global concert seconds; the rendered clip restarts at
     0, so each title's window is shifted by -t_in. Long text is word-wrapped and
-    each line is drawn as its own centered drawtext (so every line is centred
-    independently), stacked into a lower-third anchored near the bottom. Text is
-    written to sidecar files and pulled in with textfile= so quotes/colons/commas
-    need no escaping. Returns '' when nothing overlaps.
+    each line is drawn as its own drawtext (so every line is centred about the
+    title's x). The whole block is centred on the title's normalized (x, y) —
+    defaulting to a centred lower-third. Text is written to sidecar files and
+    pulled in with textfile= so quotes/colons/commas need no escaping. Returns
+    '' when nothing overlaps.
     """
     fs_main, fs_sub = round(H / 16), round(H / 27)
     lh_main, lh_sub = fs_main * 1.18, fs_sub * 1.25
@@ -144,13 +150,17 @@ def title_filter(perf_titles, t_in, t_out, work_dir):
         if b - a <= 0.05:
             continue
         fd = min(0.4, max(0.05, (b - a) / 2))
-        tail = f"x=(w-text_w)/2:enable='between(t,{a:.3f},{b:.3f})':{_fade_alpha(a, b, fd)}"
+        cx = TITLE_DEF_X if ttl.get("x") is None else float(ttl["x"])
+        cy = TITLE_DEF_Y if ttl.get("y") is None else float(ttl["y"])
+        # each line horizontally centred about cx; block vertically centred on cy
+        x_expr = f"(w*{cx:.4f}-text_w/2)"
+        tail = f"x={x_expr}:enable='between(t,{a:.3f},{b:.3f})':{_fade_alpha(a, b, fd)}"
 
         main_lines = _wrap((ttl.get("text") or "").strip(), TITLE_MAIN_MAX_CHARS)
         sub_lines = _wrap((ttl.get("subtitle") or "").strip(), TITLE_SUB_MAX_CHARS)
         gap = fs_main * 0.5 if (main_lines and sub_lines) else 0
         block_h = len(main_lines) * lh_main + gap + len(sub_lines) * lh_sub
-        y0 = H * 0.90 - block_h          # anchor the block's bottom near 90% height
+        y0 = cy * H - block_h / 2        # centre the block vertically on cy
 
         for li, line in enumerate(main_lines):
             tf = os.path.join(work_dir, f"title_{n}_m{li}.txt")
@@ -185,6 +195,7 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=()):
     perf_titles = [
         {"text": tt.get("text", ""), "subtitle": tt.get("subtitle", ""),
          "in": float(tt["in"]), "out": float(tt["out"]),
+         "x": tt.get("x"), "y": tt.get("y"),
          "local_in": round(max(0.0, float(tt["in"]) - t_in), 3),
          "local_out": round(min(t_out, float(tt["out"])) - t_in, 3)}
         for tt in titles

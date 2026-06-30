@@ -76,9 +76,12 @@ editor:
 - **Drag the title's left/right handles** to set its start/end (= how long the
   text is on screen); **drag the body of the block to slide the whole title**
   to a different point in the timeline.
-- A **live preview** of the title is overlaid on the video as a lower-third
-  whenever the playhead is inside its window — scrub through it to see exactly
-  how the burned-in render will look (text, position, fade).
+- A **live preview** of the title is overlaid on each camera pane (at its true
+  16:9 frame) whenever the playhead is inside its window — scrub through it to
+  see exactly how the burned-in render will look (text, position, fade).
+- **Position it anywhere:** drag the title text on the video to move it; its
+  normalized x/y is stored per-title and the render places it at the same spot.
+  Long text word-wraps to the frame; the **⌖** button recenters a title.
 - Edit the **title text** and an optional **subtitle** (e.g. composer) in the
   **Titles** card on the right; changes save automatically and update the
   preview live.
