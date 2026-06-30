@@ -55,6 +55,20 @@ const TICK_H = 14;
 const TITLE_LANE_H = 24;
 const PERF_Y0 = TICK_H + TITLE_LANE_H;
 
+// Title word-wrap limits — must match render/render.py so the live preview's
+// line breaks are identical to the burned-in render.
+const TITLE_MAIN_MAX_CHARS = 40;
+const TITLE_SUB_MAX_CHARS = 56;
+function wrapText(s, max) {
+  const lines = []; let cur = '';
+  for (const w of (s || '').split(/\s+/).filter(Boolean)) {
+    if (cur && (cur.length + 1 + w.length) > max) { lines.push(cur); cur = w; }
+    else cur = cur ? `${cur} ${w}` : w;
+  }
+  if (cur) lines.push(cur);
+  return lines.join('\n');
+}
+
 /* ----------------------------------------------------------------- boot */
 async function boot() {
   const meta = await fetch('/api/meta').then(r => r.json());
@@ -166,9 +180,10 @@ function updateTitleOverlay(t) {
     return;
   }
   const main = ov.querySelector('.to-main'), sub = ov.querySelector('.to-sub');
-  main.textContent = active.text || '';
+  // Wrap with the SAME limits the render uses so the preview matches the burn-in.
+  main.textContent = wrapText(active.text || '', TITLE_MAIN_MAX_CHARS);
   main.style.display = (active.text || '').trim() ? '' : 'none';
-  sub.textContent = active.subtitle || '';
+  sub.textContent = wrapText(active.subtitle || '', TITLE_SUB_MAX_CHARS);
   sub.style.display = (active.subtitle || '').trim() ? '' : 'none';
   const h = $('#videos').clientHeight || 240;
   main.style.fontSize = Math.round(h / 16) + 'px';

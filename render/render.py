@@ -100,14 +100,43 @@ def _fade_alpha(a, b, fd):
             f"if(lt(t,{b:.3f}),({b:.3f}-t)/{fd:.3f},0))))'")
 
 
+# Word-wrap widths (max characters per line) for the burned-in titles. drawtext
+# has no auto-wrap, so we wrap here; the editor preview wraps with the SAME
+# limits so what you see while marking matches the render. Sized so a full line
+# fills ~the centre 80% of the 1920px frame at the fonts below.
+TITLE_MAIN_MAX_CHARS = 40
+TITLE_SUB_MAX_CHARS = 56
+
+
+def _wrap(text, max_chars):
+    """Greedy word-wrap into lines no longer than max_chars (a word longer than
+    the limit gets its own line rather than being split)."""
+    lines, cur = [], ""
+    for word in text.split():
+        if cur and len(cur) + 1 + len(word) > max_chars:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}" if cur else word
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def title_filter(perf_titles, t_in, t_out, work_dir):
     """Build a drawtext filterchain for the titles overlapping this performance.
 
     Times in markers are global concert seconds; the rendered clip restarts at
-    0, so each title's window is shifted by -t_in. Text is written to sidecar
-    files and pulled in with textfile= so titles with quotes/colons/commas need
-    no escaping. Returns '' when nothing overlaps.
+    0, so each title's window is shifted by -t_in. Long text is word-wrapped and
+    each line is drawn as its own centered drawtext (so every line is centred
+    independently), stacked into a lower-third anchored near the bottom. Text is
+    written to sidecar files and pulled in with textfile= so quotes/colons/commas
+    need no escaping. Returns '' when nothing overlaps.
     """
+    fs_main, fs_sub = round(H / 16), round(H / 27)
+    lh_main, lh_sub = fs_main * 1.18, fs_sub * 1.25
+    style = (f"fontfile='{TITLE_FONT}':fontcolor=white:borderw=3:"
+             f"bordercolor=black@0.9:shadowcolor=black@0.55:shadowx=2:shadowy=2")
     parts = []
     for n, ttl in enumerate(perf_titles):
         a = max(0.0, float(ttl["in"]) - t_in)
@@ -115,22 +144,27 @@ def title_filter(perf_titles, t_in, t_out, work_dir):
         if b - a <= 0.05:
             continue
         fd = min(0.4, max(0.05, (b - a) / 2))
-        text = (ttl.get("text") or "").strip()
-        sub = (ttl.get("subtitle") or "").strip()
-        common = (f"fontfile='{TITLE_FONT}':fontcolor=white:borderw=3:"
-                  f"bordercolor=black@0.9:shadowcolor=black@0.55:shadowx=2:shadowy=2:"
-                  f"x=(w-text_w)/2:enable='between(t,{a:.3f},{b:.3f})':{_fade_alpha(a, b, fd)}")
-        if text:
-            tf = os.path.join(work_dir, f"title_{n}_main.txt")
+        tail = f"x=(w-text_w)/2:enable='between(t,{a:.3f},{b:.3f})':{_fade_alpha(a, b, fd)}"
+
+        main_lines = _wrap((ttl.get("text") or "").strip(), TITLE_MAIN_MAX_CHARS)
+        sub_lines = _wrap((ttl.get("subtitle") or "").strip(), TITLE_SUB_MAX_CHARS)
+        gap = fs_main * 0.5 if (main_lines and sub_lines) else 0
+        block_h = len(main_lines) * lh_main + gap + len(sub_lines) * lh_sub
+        y0 = H * 0.90 - block_h          # anchor the block's bottom near 90% height
+
+        for li, line in enumerate(main_lines):
+            tf = os.path.join(work_dir, f"title_{n}_m{li}.txt")
             with open(tf, "w") as f:
-                f.write(text)
-            y = "(h*0.74)" if sub else "(h*0.80)"
-            parts.append(f"drawtext=textfile='{tf}':fontsize=h/16:y={y}:{common}")
-        if sub:
-            tf = os.path.join(work_dir, f"title_{n}_sub.txt")
+                f.write(line)
+            y = round(y0 + li * lh_main)
+            parts.append(f"drawtext=textfile='{tf}':{style}:fontsize={fs_main}:y={y}:{tail}")
+        sy0 = y0 + len(main_lines) * lh_main + gap
+        for li, line in enumerate(sub_lines):
+            tf = os.path.join(work_dir, f"title_{n}_s{li}.txt")
             with open(tf, "w") as f:
-                f.write(sub)
-            parts.append(f"drawtext=textfile='{tf}':fontsize=h/27:y=(h*0.84):{common}")
+                f.write(line)
+            y = round(sy0 + li * lh_sub)
+            parts.append(f"drawtext=textfile='{tf}':{style}:fontsize={fs_sub}:y={y}:{tail}")
     return ",".join(parts)
 
 

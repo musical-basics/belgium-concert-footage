@@ -59,13 +59,14 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 .title-overlay[hidden] { display: none; }
 .title-overlay .to-main,
 .title-overlay .to-sub {
-  color: #fff; line-height: 1.12; max-width: 100%;
+  color: #fff; max-width: 100%;
+  white-space: pre-line;            /* honour the explicit \n line breaks */
   text-shadow: 0 0 5px rgba(0,0,0,0.95), 2px 2px 3px rgba(0,0,0,0.7);
   -webkit-text-stroke: 1px rgba(0,0,0,0.85);
   paint-order: stroke fill;
 }
-.title-overlay .to-main { font-weight: 700; }
-.title-overlay .to-sub { font-weight: 600; }
+.title-overlay .to-main { font-weight: 700; line-height: 1.18; }
+.title-overlay .to-sub { font-weight: 600; line-height: 1.25; }
 .track {
   position: relative; flex: 1; background: #000; border: 1px solid var(--line);
   border-radius: 8px; overflow: hidden; display: flex; flex-direction: column;
