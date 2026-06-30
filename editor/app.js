@@ -446,9 +446,10 @@ function selectTitleQuiet(idx) {
   markFullDirty();
 }
 
-function deleteTitle(idx) {
+function deleteTitle(idx, opts = {}) {
   if (idx < 0 || idx >= State.titles.length) return;
-  if (!confirm(`Delete title "${State.titles[idx].text || 'Untitled'}"?`)) return;
+  if (opts.confirm !== false &&
+      !confirm(`Delete title "${State.titles[idx].text || 'Untitled'}"?`)) return;
   pushUndo();
   State.titles.splice(idx, 1);
   if (State.selectedTitle === idx) State.selectedTitle = -1;
@@ -1247,6 +1248,10 @@ function wireKeys() {
       case 'i': case 'I': markIn(); break;
       case 'o': case 'O': markOut(); break;
       case 'Enter': addPending(); break;
+      case 'Backspace': case 'Delete':
+        if (State.selectedTitle >= 0) { e.preventDefault(); deleteTitle(State.selectedTitle, { confirm: false }); }
+        else if (State.selected >= 0) { e.preventDefault(); deleteSelected(); }
+        break;
       case 't': case 'T': addTitle(); break;
       case 'p': case 'P': previewSelected(); break;
       case '=': case '+': e.preventDefault(); zoomAround(playTime(), 0.6); break;
