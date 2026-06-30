@@ -31,6 +31,7 @@ const State = {
   pendingOut: null,
   perfs: [],
   selected: -1,
+  exports: {},         // 1-based index -> {status, elapsed, file, error} (export jobs)
   titles: [],          // on-screen text overlays {text, subtitle, in, out, x, y}
   selectedTitle: -1,
   titleOverlays: [],   // per-camera-pane preview overlays [{box,block,main,sub,video}]
@@ -104,6 +105,7 @@ async function boot() {
   wireForm();
   wireBackups();
   wireKeys();
+  pollExports();           // pick up any export already running
   tickLoop();
   updateStatus();
 }
@@ -1013,17 +1015,106 @@ function renderPerfs() {
       <span class="dur">${fmtDur(p.out - p.in)}</span>
       <span class="rowbtns">
         <button class="small" data-act="edit" title="Edit in form">Edit</button>
+        <button class="small exp-btn" data-act="export" data-idx="${i+1}" title="Export just this performance to output/">⤓ Export</button>
+        <button class="small openbtn" data-act="open" title="Open the exported file" hidden>▶</button>
         <button class="small danger" data-act="del" title="Delete">✕</button>
       </span>`;
     li.onclick = () => selectPerf(i);
     li.querySelector('[data-act=edit]').onclick = (e) => {
       e.stopPropagation(); selectPerf(i); $('#fTitle').focus();
     };
+    li.querySelector('[data-act=export]').onclick = (e) => {
+      e.stopPropagation(); exportPerf(i);
+    };
+    li.querySelector('[data-act=open]').onclick = (e) => {
+      e.stopPropagation();
+      const f = e.currentTarget.dataset.file;
+      if (f) fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ file: f }) });
+    };
     li.querySelector('[data-act=del]').onclick = (e) => {
       e.stopPropagation(); deletePerf(i);
     };
     ol.appendChild(li);
   });
+  updateExportRows();
+}
+
+/* --------------------------------------------------- per-performance export */
+// Each row's "Export" button renders just that performance via the server
+// (render.py --only N). Renders are serialized server-side; we poll /api/exports
+// while any job is active and reflect status on the buttons.
+let _expPollTimer = null;
+let _expPrev = {};
+
+function applyExportState(li, job) {
+  const exp = li.querySelector('[data-act=export]');
+  const open = li.querySelector('[data-act=open]');
+  if (!exp) return;
+  exp.classList.remove('busy', 'err');
+  const st = job && job.status;
+  if (st === 'queued')        { exp.textContent = '⏳ queued';            exp.disabled = true;  exp.classList.add('busy'); }
+  else if (st === 'running')  { exp.textContent = `⏳ ${job.elapsed || 0}s`; exp.disabled = true;  exp.classList.add('busy'); }
+  else if (st === 'error')    { exp.textContent = '⚠ Retry';             exp.disabled = false; exp.classList.add('err'); }
+  else                        { exp.textContent = '⤓ Export';            exp.disabled = false; }
+  // Show the ▶ open button once a file exists (persists so it can be reopened).
+  const hasFile = job && job.file;
+  open.hidden = !hasFile;
+  if (hasFile) { open.dataset.file = job.file; open.title = `Open ${job.file}`; }
+}
+
+function updateExportRows() {
+  document.querySelectorAll('#perfList li').forEach((li) => {
+    const exp = li.querySelector('[data-act=export]');
+    if (exp) applyExportState(li, State.exports[exp.dataset.idx]);
+  });
+}
+
+async function exportPerf(i) {
+  const index = i + 1;
+  if (State.dirty) await save({ auto: true });     // render reads markers.json
+  State.exports[index] = { status: 'queued', elapsed: 0, file: State.exports[index]?.file || null };
+  updateExportRows();
+  try {
+    const res = await fetch('/api/export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index }),
+    }).then(r => r.json());
+    if (!res.ok) throw new Error(res.error || 'export failed to start');
+  } catch (err) {
+    State.exports[index] = { status: 'error', error: String(err) };
+    updateExportRows();
+    return;
+  }
+  ensureExportPolling();
+}
+
+function ensureExportPolling() { if (!_expPollTimer) pollExports(); }
+
+async function pollExports() {
+  _expPollTimer = null;
+  let data;
+  try { data = await fetch('/api/exports').then(r => r.json()); }
+  catch { data = { exports: {} }; }
+  State.exports = data.exports || {};
+  updateExportRows();
+  // Flash the topbar when a job finishes.
+  for (const [idx, job] of Object.entries(State.exports)) {
+    const was = _expPrev[idx];
+    if (was !== job.status && job.status === 'done') flashStatus(`✓ exported ${job.file || `#${idx}`}`);
+    if (was !== job.status && job.status === 'error') flashStatus(`⚠ export #${idx} failed`);
+  }
+  _expPrev = Object.fromEntries(Object.entries(State.exports).map(([k, v]) => [k, v.status]));
+  if (Object.values(State.exports).some(j => j.status === 'queued' || j.status === 'running')) {
+    _expPollTimer = setTimeout(pollExports, 1500);
+  }
+}
+
+function flashStatus(msg) {
+  const s = $('#status');
+  if (!s) return;
+  s.textContent = msg;
+  s.classList.add('flash'); setTimeout(() => s.classList.remove('flash'), 600);
 }
 
 /* ----------------------------------------------------- caption transcript */

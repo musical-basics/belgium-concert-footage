@@ -139,6 +139,10 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 #perfList li .rowbtns { display: flex; gap: 4px; flex-shrink: 0; }
 #perfList li .rowbtns button { padding: 2px 8px; font-size: 11px; }
 #perfList li .rowbtns button.danger { padding: 2px 7px; }
+#perfList li .rowbtns .exp-btn { color: var(--accent); border-color: var(--accent); font-variant-numeric: tabular-nums; }
+#perfList li .rowbtns .exp-btn.busy { color: var(--warn); border-color: var(--warn); cursor: default; }
+#perfList li .rowbtns .exp-btn.err { color: var(--danger); border-color: var(--danger); }
+#perfList li .rowbtns .openbtn { color: var(--accent2); border-color: var(--accent2); padding: 2px 7px; }
 
 /* ---- titles list ---- */
 #titleList { list-style: none; margin: 0; padding: 0; }

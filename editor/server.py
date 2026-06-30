@@ -16,14 +16,18 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EDITOR_DIR = os.path.join(ROOT, "editor")
 PROXY_DIR = os.path.join(ROOT, "proxies")
+OUT_DIR = os.path.join(ROOT, "output")
+RENDER_SCRIPT = os.path.join(ROOT, "render", "render.py")
 DB_PATH = os.path.join(ROOT, "markers.db")
 MARKERS_PATH = os.path.join(ROOT, "markers.json")  # JSON mirror for the render pipeline
 META_PATH = os.path.join(ROOT, "cache", "clips_meta.json")
@@ -287,6 +291,77 @@ def restore_backup(backup_id):
     return db_save(payload)
 
 
+# ---- single-performance export jobs ----------------------------------
+# Each editor "Export" button kicks `render/render.py --only N` as a subprocess.
+# Renders are heavy, so _EXPORT_RUN_LOCK serializes them (extra requests queue);
+# job state lives in _EXPORTS keyed by 1-based performance index for status polls.
+_EXPORTS = {}
+_EXPORTS_LOCK = threading.Lock()
+_EXPORT_RUN_LOCK = threading.Lock()
+
+
+def _export_worker(index):
+    info = _EXPORTS[index]
+    try:
+        with _EXPORT_RUN_LOCK:                 # one heavy render at a time
+            info["status"] = "running"
+            info["started"] = time.time()
+            proc = subprocess.Popen(
+                [sys.executable, RENDER_SCRIPT, "--only", str(index)],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+            last = ""
+            for line in proc.stdout:           # \r progress arrives as its own lines
+                line = line.strip()
+                if not line:
+                    continue
+                last = line
+                info["line"] = line
+                m = re.search(r"(\S+\.mp4)\s*$", line)
+                if m and "✓" in line:
+                    info["file"] = m.group(1)
+            proc.wait()
+            info["code"] = proc.returncode
+            info["status"] = "done" if proc.returncode == 0 else "error"
+            if proc.returncode != 0:
+                info["error"] = last or f"render exited {proc.returncode}"
+    except Exception as e:
+        info["status"] = "error"
+        info["error"] = str(e)
+    finally:
+        info["ended"] = time.time()
+
+
+def start_export(index):
+    """Kick a background render of one performance (1-based). Returns False if
+    that performance is already queued/running."""
+    with _EXPORTS_LOCK:
+        cur = _EXPORTS.get(index)
+        if cur and cur["status"] in ("queued", "running"):
+            return False
+        _EXPORTS[index] = {"status": "queued", "requested": time.time(),
+                           "file": None, "error": None, "line": ""}
+    threading.Thread(target=_export_worker, args=(index,), daemon=True).start()
+    return True
+
+
+def exports_status():
+    """Snapshot of every export job: status, elapsed seconds, output filename."""
+    with _EXPORTS_LOCK:
+        out = {}
+        for idx, info in _EXPORTS.items():
+            start = info.get("started") or info.get("requested")
+            elapsed = round((info.get("ended") or time.time()) - start) if start else 0
+            out[idx] = {
+                "status": info["status"],
+                "elapsed": elapsed,
+                "file": os.path.basename(info["file"]) if info.get("file") else None,
+                "error": info.get("error"),
+                "line": info.get("line", ""),
+            }
+        return out
+
+
 def db_save(data):
     """Persist a full project payload, then mirror to markers.json."""
     with _DB_LOCK:
@@ -402,6 +477,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(self._load_markers())
         if path == "/api/backups":
             return self._send_json({"backups": list_backups()})
+        if path == "/api/exports":
+            return self._send_json({"exports": exports_status()})
         if path == "/api/waveform":
             if os.path.isfile(WAVE_META) and os.path.isfile(WAVE_BIN):
                 with open(WAVE_META) as f:
@@ -458,6 +535,31 @@ class Handler(BaseHTTPRequestHandler):
             if restored is None:
                 return self._send_json({"ok": False, "error": "no such backup"}, 404)
             return self._send_json({"ok": True, "restored": restored})
+        if path == "/api/export":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                index = int(json.loads(raw.decode("utf-8")).get("index"))
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            started = start_export(index)
+            return self._send_json({"ok": True, "index": index, "started": started})
+        if path == "/api/open":
+            # Open a finished render in the default player. Restricted to OUT_DIR.
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                fname = os.path.basename(json.loads(raw.decode("utf-8")).get("file", ""))
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            target = os.path.join(OUT_DIR, fname)
+            if not fname or not os.path.isfile(target):
+                return self._send_json({"ok": False, "error": "no such file"}, 404)
+            try:
+                subprocess.Popen(["open", target])
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+            return self._send_json({"ok": True})
         self.send_error(404, "Not found")
 
     # ---- data --------------------------------------------------------
