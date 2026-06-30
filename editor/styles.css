@@ -48,7 +48,24 @@ input[type=number] { width: 110px; }
 
 main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 10px 14px; gap: 10px; }
 
-#videos { display: flex; gap: 8px; height: 38vh; min-height: 220px; }
+#videos { display: flex; gap: 8px; height: 38vh; min-height: 220px; position: relative; }
+
+/* live WYSIWYG preview of a title overlaid on the video area */
+.title-overlay {
+  position: absolute; left: 0; right: 0; bottom: 13%; z-index: 4;
+  display: flex; flex-direction: column; align-items: center; gap: 0.25em;
+  text-align: center; padding: 0 6%; pointer-events: none;
+}
+.title-overlay[hidden] { display: none; }
+.title-overlay .to-main,
+.title-overlay .to-sub {
+  color: #fff; line-height: 1.12; max-width: 100%;
+  text-shadow: 0 0 5px rgba(0,0,0,0.95), 2px 2px 3px rgba(0,0,0,0.7);
+  -webkit-text-stroke: 1px rgba(0,0,0,0.85);
+  paint-order: stroke fill;
+}
+.title-overlay .to-main { font-weight: 700; }
+.title-overlay .to-sub { font-weight: 600; }
 .track {
   position: relative; flex: 1; background: #000; border: 1px solid var(--line);
   border-radius: 8px; overflow: hidden; display: flex; flex-direction: column;

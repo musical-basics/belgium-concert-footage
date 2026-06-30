@@ -33,6 +33,7 @@ const State = {
   selected: -1,
   titles: [],          // on-screen text overlays {text, subtitle, in, out}
   selectedTitle: -1,
+  titleOverlay: null,  // DOM node for the live WYSIWYG title preview
   seed: 42,
   dirty: false,
   undoStack: [],       // snapshots of perfs/seed taken before each edit
@@ -140,6 +141,44 @@ function buildVideos() {
     if (c.is_audio) State.master = v;
   });
   if (!State.master) State.master = State.videos[0];
+
+  // Live title preview: a lower-third overlaid on the video area, shown while
+  // the playhead is inside a title's window — a WYSIWYG of the burned-in render.
+  const ov = document.createElement('div');
+  ov.id = 'titleOverlay';
+  ov.className = 'title-overlay';
+  ov.hidden = true;
+  ov.innerHTML = '<div class="to-main"></div><div class="to-sub"></div>';
+  wrap.appendChild(ov);
+  State.titleOverlay = ov;
+}
+
+// Mirror the burned-in render: show whichever title covers the playhead, sized
+// relative to the video area (render uses fontsize h/16 + h/27) with a matching
+// 0.4 s opacity fade in/out.
+function updateTitleOverlay(t) {
+  const ov = State.titleOverlay;
+  if (!ov) return;
+  let active = null;
+  for (const tt of State.titles) if (t >= tt.in && t <= tt.out) active = tt;  // topmost wins
+  if (!active || !((active.text || '').trim() || (active.subtitle || '').trim())) {
+    if (!ov.hidden) ov.hidden = true;
+    return;
+  }
+  const main = ov.querySelector('.to-main'), sub = ov.querySelector('.to-sub');
+  main.textContent = active.text || '';
+  main.style.display = (active.text || '').trim() ? '' : 'none';
+  sub.textContent = active.subtitle || '';
+  sub.style.display = (active.subtitle || '').trim() ? '' : 'none';
+  const h = $('#videos').clientHeight || 240;
+  main.style.fontSize = Math.round(h / 16) + 'px';
+  sub.style.fontSize = Math.round(h / 27) + 'px';
+  const fd = Math.min(0.4, Math.max(0.05, (active.out - active.in) / 2));
+  let op = 1;
+  if (t < active.in + fd) op = (t - active.in) / fd;
+  else if (t > active.out - fd) op = (active.out - t) / fd;
+  ov.style.opacity = Math.max(0, Math.min(1, op)).toFixed(2);
+  if (ov.hidden) ov.hidden = false;
 }
 
 function buildAudioSelect() {
@@ -205,6 +244,7 @@ function tickLoop() {
     keepPlayheadInView(t);
   }
   drawTimeline(t);
+  updateTitleOverlay(t);
   updateTranscriptHighlight(t);
   requestAnimationFrame(tickLoop);
 }
@@ -469,7 +509,6 @@ function xToTime(x)  { return State.view.start + x / State.tl.w * State.view.spa
 function clampStart(start, span) { return Math.max(0, Math.min(State.duration - span, start)); }
 
 let pendingClickBlock = -1;
-let pendingClickTitle = -1;
 
 function initTimeline() {
   const wave = $('#wave'), ov = $('#overview');
@@ -756,6 +795,19 @@ function applyHandleDrag(drag, tm) {
   markFullDirty();
 }
 
+// Slide a whole title along the timeline (drag its body, not an edge). Keeps
+// the title's length fixed; the playhead follows so the preview tracks it.
+function moveTitle(drag, tm) {
+  const t = State.titles[drag.i];
+  const len = drag.out0 - drag.in0;
+  let nin = +(drag.in0 + (tm - drag.grab)).toFixed(3);
+  nin = Math.max(0, Math.min(State.duration - len, nin));
+  t.in = nin;
+  t.out = +(nin + len).toFixed(3);
+  seekAll(t.in);
+  renderTitles(); markFullDirty();
+}
+
 function wireTimelineInput() {
   const t = State.tl;
   t.wave.addEventListener('wheel', (e) => {
@@ -784,13 +836,20 @@ function wireTimelineInput() {
       selectTitle(th.i, { seek: false });
       return;
     }
+    const ti = titleHit(x, y);                      // title body -> move the whole title
+    if (ti >= 0) {
+      const tt = State.titles[ti];
+      drag = { kind: 'titlemove', i: ti, grab: xToTime(x), in0: tt.in, out0: tt.out };
+      dragSnapped = false;
+      selectTitle(ti, { seek: false });
+      return;
+    }
     const h = handleHit(x, y);
     if (h) {                                        // perf edge -> resize, don't scrub
       drag = { kind: 'perf', ...h }; dragSnapped = false;
       selectPerf(h.i, { seek: false });
       return;
     }
-    pendingClickTitle = titleHit(x, y);
     pendingClickBlock = blockHit(x, y);
     scrubbing = true;
     seekAll(xToTime(x));
@@ -798,7 +857,8 @@ function wireTimelineInput() {
   window.addEventListener('mousemove', (e) => {
     if (drag) {
       if (!dragSnapped) { pushUndo(); dragSnapped = true; }   // snapshot on first move
-      applyHandleDrag(drag, xToTime(localX(e)));
+      if (drag.kind === 'titlemove') moveTitle(drag, xToTime(localX(e)));
+      else applyHandleDrag(drag, xToTime(localX(e)));
       return;
     }
     if (!scrubbing) return;
@@ -807,13 +867,14 @@ function wireTimelineInput() {
     seekAll(xToTime(x));
   });
   window.addEventListener('mouseup', () => {
-    if (drag) {                                     // finalize resize, keep selection, autosave
+    if (drag) {                                     // finalize move/resize, keep selection, autosave
       if (dragSnapped) {                            // only if it actually moved
-        const arr = drag.kind === 'title' ? State.titles : State.perfs;
+        const isTitle = drag.kind !== 'perf';
+        const arr = isTitle ? State.titles : State.perfs;
         const p = arr[drag.i];
         arr.sort((a, b) => a.in - b.in);
         markDirty();
-        if (drag.kind === 'title') {
+        if (isTitle) {
           State.selectedTitle = arr.indexOf(p);
           selectTitle(State.selectedTitle, { seek: false });
         } else {
@@ -824,18 +885,18 @@ function wireTimelineInput() {
       drag = null;
       return;
     }
-    if (scrubbing && !moved) {
-      if (pendingClickTitle >= 0) selectTitle(pendingClickTitle, { seek: false });
-      else if (pendingClickBlock >= 0) selectPerf(pendingClickBlock, { seek: false });
-    }
-    scrubbing = false; pendingClickBlock = -1; pendingClickTitle = -1;
+    if (scrubbing && !moved && pendingClickBlock >= 0) selectPerf(pendingClickBlock, { seek: false });
+    scrubbing = false; pendingClickBlock = -1;
   });
   // cursor hint when hovering an edge handle (perf or title)
   t.wave.addEventListener('mousemove', (e) => {
     if (drag || scrubbing) return;
     const r = t.wave.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
-    t.wave.style.cursor = (handleHit(x, y) || titleHandleHit(x, y)) ? 'ew-resize' : 'default';
+    t.wave.style.cursor =
+      (handleHit(x, y) || titleHandleHit(x, y)) ? 'ew-resize'
+      : titleHit(x, y) >= 0 ? 'grab'
+      : 'default';
   });
 
   let panning = false;

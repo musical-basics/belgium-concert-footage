@@ -73,10 +73,15 @@ editor:
 
 - Click **+ Create title** (or press **T**) to drop a title at the playhead. It
   appears as a **purple block in the title lane** at the top of the timeline.
-- **Drag the title's left/right handles** on the timeline to set its start/end
-  (its in/out = how long the text is on screen).
+- **Drag the title's left/right handles** to set its start/end (= how long the
+  text is on screen); **drag the body of the block to slide the whole title**
+  to a different point in the timeline.
+- A **live preview** of the title is overlaid on the video as a lower-third
+  whenever the playhead is inside its window — scrub through it to see exactly
+  how the burned-in render will look (text, position, fade).
 - Edit the **title text** and an optional **subtitle** (e.g. composer) in the
-  **Titles** card on the right; changes save automatically.
+  **Titles** card on the right; changes save automatically and update the
+  preview live.
 - Titles are stored in `markers.json` under `"titles"` and rendered as a
   centered lower-third (white text, soft outline, 0.4 s fade in/out). A title
   is drawn over whichever performance render(s) its window falls in.
