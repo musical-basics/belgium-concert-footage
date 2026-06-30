@@ -65,6 +65,22 @@ Open **http://localhost:8000**. You'll see the 3 angles stacked and synced.
 - Set the **Seed** (controls the random-but-reproducible cut pattern).
 - Click **Save markers** (top right) to write `markers.json`.
 
+### Titles (on-screen text overlays)
+
+Add text that burns into the final render — a song title card, a lower-third,
+whatever — and drag its handles to set exactly how long it shows, like a video
+editor:
+
+- Click **+ Create title** (or press **T**) to drop a title at the playhead. It
+  appears as a **purple block in the title lane** at the top of the timeline.
+- **Drag the title's left/right handles** on the timeline to set its start/end
+  (its in/out = how long the text is on screen).
+- Edit the **title text** and an optional **subtitle** (e.g. composer) in the
+  **Titles** card on the right; changes save automatically.
+- Titles are stored in `markers.json` under `"titles"` and rendered as a
+  centered lower-third (white text, soft outline, 0.4 s fade in/out). A title
+  is drawn over whichever performance render(s) its window falls in.
+
 The `Audio:` dropdown only changes which angle you *hear while marking* — the
 final render's audio bed is set separately (default: Back Camera).
 
@@ -79,9 +95,14 @@ python3 render/render.py --encoder x264  # bit-exact CPU encode (slower)
 ```
 
 Each performance →
-- `output/NN_title.mp4` — the finished multi-cam video (1280×720, 60fps)
+- `output/NN_title.mp4` — the finished multi-cam video (1920×1080, 60fps), with
+  any overlapping **titles burned in** as lower-thirds
 - `output/NN_title.plan.json` — the exact cut list (every segment, camera, and
-  whether its cut was `audio`-snapped or `heuristic`)
+  whether its cut was `audio`-snapped or `heuristic`) plus the `titles` overlaid
+  on this performance (with clip-local start/end times)
+
+Performances with no titles over them are stream-copied (fast); a performance
+that has titles is re-encoded once to burn them in.
 
 ---
 

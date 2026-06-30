@@ -54,6 +54,7 @@
     <span class="inout" id="inoutLabel">in: — &nbsp; out: —</span>
     <button id="markOutBtn" class="mark" title="O">Mark Out</button>
     <button id="addBtn" class="primary" title="Enter">+ Add performance</button>
+    <button id="addTitleBtn" class="title-btn" title="Create a title overlay at the playhead (T)">+ Create title</button>
   </section>
 
   <section id="timelineWrap">
@@ -108,11 +109,21 @@
       </div>
       <ol id="perfList"></ol>
     </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>Titles (<span id="titleCount">0</span>)</h3>
+        <button id="addTitleBtn2" class="title-btn small">+ Create title</button>
+      </div>
+      <p class="cardhint">Text overlays burned into the final render. Create one,
+        then drag its handles on the timeline to set how long it shows.</p>
+      <ol id="titleList"></ol>
+    </div>
   </section>
 </main>
 
 <footer id="help">
-  <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>I</b> in · <b>O</b> out · <b>Enter</b> add · <b>P</b> preview · <b>+ −</b> zoom · <b>0</b> fit
+  <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>I</b> in · <b>O</b> out · <b>Enter</b> add · <b>T</b> title · <b>P</b> preview · <b>+ −</b> zoom · <b>0</b> fit
 </footer>
 
 <script src="app.js"></script>

@@ -31,6 +31,8 @@ const State = {
   pendingOut: null,
   perfs: [],
   selected: -1,
+  titles: [],          // on-screen text overlays {text, subtitle, in, out}
+  selectedTitle: -1,
   seed: 42,
   dirty: false,
   undoStack: [],       // snapshots of perfs/seed taken before each edit
@@ -43,6 +45,14 @@ const State = {
 };
 
 const MIN_SPAN = 4;                // most-zoomed-in window (seconds)
+
+// Timeline vertical layout (px from the top of the wave canvas):
+//   0 .. TICK_H        time ticks / labels
+//   TICK_H .. PERF_Y0  the title lane (text-overlay regions)
+//   PERF_Y0 .. h       the performance blocks
+const TICK_H = 14;
+const TITLE_LANE_H = 24;
+const PERF_Y0 = TICK_H + TITLE_LANE_H;
 
 /* ----------------------------------------------------------------- boot */
 async function boot() {
@@ -61,7 +71,9 @@ async function boot() {
   State.seed = (m && m.seed) || 42;
   $('#seedInput').value = State.seed;
   State.perfs = (m && m.performances) ? m.performances.slice() : [];
+  State.titles = (m && m.titles) ? m.titles.slice() : [];
   renderPerfs();
+  renderTitles();
 
   initTimeline();
   loadWaveform();
@@ -221,6 +233,8 @@ function wireTransport() {
   $('#markInBtn').onclick = markIn;
   $('#markOutBtn').onclick = markOut;
   $('#addBtn').onclick = addPending;
+  $('#addTitleBtn').onclick = addTitle;
+  $('#addTitleBtn2').onclick = addTitle;
   $('#saveBtn').onclick = save;
   $('#undoBtn').onclick = undo;
   $('#audioSource');
@@ -320,6 +334,8 @@ function clearForm(keepSel) {
 function selectPerf(idx, opts = {}) {
   const { seek = true } = opts;            // timeline clicks select without moving playhead
   State.selected = idx;
+  State.selectedTitle = -1;                // perf + title selection are mutually exclusive
+  renderTitles();
   const p = State.perfs[idx];
   $('#fTitle').value = p.title || '';
   $('#fComposer').value = p.composer || '';
@@ -348,6 +364,95 @@ function previewSelected() {
   playAll();
 }
 
+/* --------------------------------------------------------------- titles */
+// A title is a text overlay shown over the final render for its [in, out]
+// window. Create one at the playhead, then drag its handles on the timeline
+// (in the purple lane) to set how long it appears — like a video editor.
+const TITLE_DEFAULT_LEN = 4;       // seconds for a freshly created title
+
+function addTitle() {
+  pushUndo();
+  const t = playTime();
+  let tin = t, tout = Math.min(State.duration, t + TITLE_DEFAULT_LEN);
+  if (tout - tin < 1) tin = Math.max(0, tout - TITLE_DEFAULT_LEN);   // near the very end
+  const title = { text: 'Title', subtitle: '', in: +tin.toFixed(3), out: +tout.toFixed(3) };
+  State.titles.push(title);
+  State.titles.sort((a, b) => a.in - b.in);
+  State.selectedTitle = State.titles.indexOf(title);
+  State.selected = -1; clearForm();
+  markDirty();
+  renderTitles(); markFullDirty();
+  focusRange(title.in, title.out);
+  const inp = document.querySelector(`#titleList li[data-i="${State.selectedTitle}"] .ttext`);
+  if (inp) { inp.focus(); inp.select(); }
+}
+
+function selectTitle(idx, opts = {}) {
+  const { seek = true } = opts;
+  State.selectedTitle = idx;
+  State.selected = -1; clearForm();         // clearForm() re-renders the perf list
+  renderTitles(); markFullDirty();
+  const t = State.titles[idx];
+  if (seek && t) { focusRange(t.in, t.out); seekAll(t.in); }
+}
+
+// Set selection from a focus event without rebuilding the list (keeps the
+// text input the user just clicked into focused).
+function selectTitleQuiet(idx) {
+  if (State.selectedTitle === idx && State.selected === -1) return;
+  State.selectedTitle = idx; State.selected = -1; clearForm();
+  document.querySelectorAll('#titleList li').forEach(li =>
+    li.classList.toggle('sel', Number(li.dataset.i) === idx));
+  markFullDirty();
+}
+
+function deleteTitle(idx) {
+  if (idx < 0 || idx >= State.titles.length) return;
+  if (!confirm(`Delete title "${State.titles[idx].text || 'Untitled'}"?`)) return;
+  pushUndo();
+  State.titles.splice(idx, 1);
+  if (State.selectedTitle === idx) State.selectedTitle = -1;
+  else if (State.selectedTitle > idx) State.selectedTitle--;
+  markDirty();
+  renderTitles(); markFullDirty();
+}
+
+function renderTitles() {
+  const ol = $('#titleList'); if (!ol) return;
+  ol.innerHTML = '';
+  $('#titleCount').textContent = State.titles.length;
+  if (!State.titles.length) {
+    ol.innerHTML = '<li class="title-empty">No titles yet — click “+ Create title”.</li>';
+    return;
+  }
+  State.titles.forEach((t, i) => {
+    const li = document.createElement('li');
+    li.className = i === State.selectedTitle ? 'sel' : '';
+    li.dataset.i = i;
+    li.innerHTML = `
+      <span class="tnum">${i + 1}</span>
+      <span class="tmeta">
+        <input class="ttext" type="text" placeholder="Title text" value="${escapeHtml(t.text || '')}" />
+        <input class="ttext tsub" type="text" placeholder="Subtitle (optional)" value="${escapeHtml(t.subtitle || '')}" />
+        <span class="ttime">${fmtTC(t.in)} → ${fmtTC(t.out)} · ${fmtDur(t.out - t.in)}</span>
+      </span>
+      <span class="rowbtns">
+        <button class="small danger" data-act="del" title="Delete">✕</button>
+      </span>`;
+    const [txt, sub] = li.querySelectorAll('.ttext');
+    li.onclick = () => selectTitle(i);
+    txt.onclick = sub.onclick = (e) => e.stopPropagation();
+    txt.addEventListener('focus', () => selectTitleQuiet(i));
+    sub.addEventListener('focus', () => selectTitleQuiet(i));
+    // Live-edit text without rebuilding the list (would steal focus): just
+    // update the model, redraw the timeline label, and autosave.
+    txt.addEventListener('input', () => { t.text = txt.value; markDirty(); markFullDirty(); });
+    sub.addEventListener('input', () => { t.subtitle = sub.value; markDirty(); });
+    li.querySelector('[data-act=del]').onclick = (e) => { e.stopPropagation(); deleteTitle(i); };
+    ol.appendChild(li);
+  });
+}
+
 /* ------------------------------------------------- zoomable canvas timeline */
 function markTimelineDirty() { State.tlDirty = true; }
 function markFullDirty() { State.tlDirty = true; State.ovDirty = true; }
@@ -364,6 +469,7 @@ function xToTime(x)  { return State.view.start + x / State.tl.w * State.view.spa
 function clampStart(start, span) { return Math.max(0, Math.min(State.duration - span, start)); }
 
 let pendingClickBlock = -1;
+let pendingClickTitle = -1;
 
 function initTimeline() {
   const wave = $('#wave'), ov = $('#overview');
@@ -465,6 +571,12 @@ function rebuildOverviewStatic() {
     ctx.fillStyle = i === State.selected ? 'rgba(52,211,153,0.55)' : 'rgba(79,140,255,0.45)';
     ctx.fillRect(x0, 0, Math.max(1, x1 - x0), t.oh);
   });
+  // titles: thin purple marks along the top of the minimap
+  State.titles.forEach((tt) => {
+    const x0 = tt.in / State.duration * t.ow, x1 = tt.out / State.duration * t.ow;
+    ctx.fillStyle = 'rgba(192,132,252,0.85)';
+    ctx.fillRect(x0, 0, Math.max(2, x1 - x0), 3);
+  });
 }
 
 function rebuildStatic() {
@@ -488,28 +600,50 @@ function rebuildStatic() {
   }
 
   // performance blocks
+  const ph = t.h - PERF_Y0;
   State.perfs.forEach((p, i) => {
     const x0 = timeToX(p.in), x1 = timeToX(p.out);
     if (x1 < 0 || x0 > t.w) return;
     const sel = i === State.selected;
     ctx.fillStyle = sel ? 'rgba(52,211,153,0.20)' : 'rgba(79,140,255,0.16)';
-    ctx.fillRect(x0, 14, x1 - x0, t.h - 14);
+    ctx.fillRect(x0, PERF_Y0, x1 - x0, ph);
     ctx.strokeStyle = sel ? '#34d399' : '#4f8cff';
     ctx.lineWidth = sel ? 2 : 1;
-    ctx.strokeRect(x0 + 0.5, 14.5, x1 - x0 - 1, t.h - 15);
+    ctx.strokeRect(x0 + 0.5, PERF_Y0 + 0.5, x1 - x0 - 1, ph - 1);
     // in/out drag handles (grips on each edge)
     const hw = 3, grip = sel ? '#34d399' : '#7aa6ff';
     ctx.fillStyle = grip;
-    ctx.fillRect(x0, 14, hw, t.h - 14);
-    ctx.fillRect(x1 - hw, 14, hw, t.h - 14);
+    ctx.fillRect(x0, PERF_Y0, hw, ph);
+    ctx.fillRect(x1 - hw, PERF_Y0, hw, ph);
     ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1;
     for (const hx of [x0 + hw / 2, x1 - hw / 2]) {
-      ctx.beginPath(); ctx.moveTo(hx + 0.5, 18); ctx.lineTo(hx + 0.5, t.h - 4); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(hx + 0.5, PERF_Y0 + 4); ctx.lineTo(hx + 0.5, t.h - 4); ctx.stroke();
     }
     ctx.fillStyle = sel ? '#d6ffe9' : '#cfe0ff';
     ctx.save();
-    ctx.beginPath(); ctx.rect(x0 + hw + 2, 14, Math.max(0, x1 - x0 - 2 * hw - 4), t.h - 14); ctx.clip();
-    ctx.fillText(`${i + 1}. ${p.title}`, x0 + hw + 4, 26);
+    ctx.beginPath(); ctx.rect(x0 + hw + 2, PERF_Y0, Math.max(0, x1 - x0 - 2 * hw - 4), ph); ctx.clip();
+    ctx.fillText(`${i + 1}. ${p.title}`, x0 + hw + 4, PERF_Y0 + 12);
+    ctx.restore();
+  });
+
+  // title lane (text overlays) — the purple band above the performance blocks
+  State.titles.forEach((tt, i) => {
+    const x0 = timeToX(tt.in), x1 = timeToX(tt.out);
+    if (x1 < 0 || x0 > t.w) return;
+    const sel = i === State.selectedTitle;
+    ctx.fillStyle = sel ? 'rgba(192,132,252,0.40)' : 'rgba(192,132,252,0.22)';
+    ctx.fillRect(x0, TICK_H, x1 - x0, TITLE_LANE_H);
+    ctx.strokeStyle = sel ? '#c084fc' : '#9d6fd6';
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeRect(x0 + 0.5, TICK_H + 0.5, x1 - x0 - 1, TITLE_LANE_H - 1);
+    const hw = 3;
+    ctx.fillStyle = sel ? '#c084fc' : '#b48be0';
+    ctx.fillRect(x0, TICK_H, hw, TITLE_LANE_H);
+    ctx.fillRect(x1 - hw, TICK_H, hw, TITLE_LANE_H);
+    ctx.fillStyle = '#f3e9ff';
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x0 + hw + 2, TICK_H, Math.max(0, x1 - x0 - 2 * hw - 4), TITLE_LANE_H); ctx.clip();
+    ctx.fillText(`T ${tt.text || 'Title'}`, x0 + hw + 4, TICK_H + 15);
     ctx.restore();
   });
 
@@ -517,7 +651,7 @@ function rebuildStatic() {
   const pi = State.pendingIn, po = State.pendingOut;
   if (pi != null && po != null && po > pi) {
     ctx.fillStyle = 'rgba(245,158,11,0.16)';
-    ctx.fillRect(timeToX(pi), 14, timeToX(po) - timeToX(pi), t.h - 14);
+    ctx.fillRect(timeToX(pi), PERF_Y0, timeToX(po) - timeToX(pi), ph);
   }
   ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 1.5;
   for (const m of [pi, po]) if (m != null) {
@@ -561,7 +695,7 @@ function drawTimeline(playT) {
 }
 
 function blockHit(x, y) {
-  if (y < 14) return -1;
+  if (y < PERF_Y0) return -1;
   for (let i = State.perfs.length - 1; i >= 0; i--) {
     const p = State.perfs[i];
     if (x >= timeToX(p.in) && x <= timeToX(p.out)) return i;
@@ -572,9 +706,9 @@ function blockHit(x, y) {
 const HANDLE_TOL = 6;   // px tolerance for grabbing a region edge
 const MIN_LEN = 0.1;    // shortest allowed region (seconds)
 
-// Is the cursor over an in/out drag handle? Returns { i, edge } or null.
+// Is the cursor over a performance in/out drag handle? Returns { i, edge } or null.
 function handleHit(x, y) {
-  if (y < 14) return null;
+  if (y < PERF_Y0) return null;
   for (let i = State.perfs.length - 1; i >= 0; i--) {
     const p = State.perfs[i];
     if (Math.abs(x - timeToX(p.in))  <= HANDLE_TOL) return { i, edge: 'in' };
@@ -583,15 +717,43 @@ function handleHit(x, y) {
   return null;
 }
 
-// Live-adjust a region edge while dragging its handle.
+// Title-lane equivalents (the purple band, TICK_H .. PERF_Y0).
+const inTitleLane = (y) => y >= TICK_H && y < PERF_Y0;
+
+function titleHit(x, y) {
+  if (!inTitleLane(y)) return -1;
+  for (let i = State.titles.length - 1; i >= 0; i--) {
+    const t = State.titles[i];
+    if (x >= timeToX(t.in) && x <= timeToX(t.out)) return i;
+  }
+  return -1;
+}
+
+function titleHandleHit(x, y) {
+  if (!inTitleLane(y)) return null;
+  for (let i = State.titles.length - 1; i >= 0; i--) {
+    const t = State.titles[i];
+    if (Math.abs(x - timeToX(t.in))  <= HANDLE_TOL) return { i, edge: 'in' };
+    if (Math.abs(x - timeToX(t.out)) <= HANDLE_TOL) return { i, edge: 'out' };
+  }
+  return null;
+}
+
+// Live-adjust a region edge while dragging its handle (perf or title).
 function applyHandleDrag(drag, tm) {
-  const p = State.perfs[drag.i];
+  const arr = drag.kind === 'title' ? State.titles : State.perfs;
+  const p = arr[drag.i];
   tm = Math.max(0, Math.min(State.duration, +tm.toFixed(3)));
   if (drag.edge === 'in') p.in = Math.min(tm, p.out - MIN_LEN);
   else                    p.out = Math.max(tm, p.in + MIN_LEN);
   seekAll(drag.edge === 'in' ? p.in : p.out);   // playhead follows the edge
-  if (State.selected === drag.i) { $('#fIn').value = p.in; $('#fOut').value = p.out; }
-  renderPerfs(); markFullDirty();
+  if (drag.kind === 'title') {
+    renderTitles();
+  } else {
+    if (State.selected === drag.i) { $('#fIn').value = p.in; $('#fOut').value = p.out; }
+    renderPerfs();
+  }
+  markFullDirty();
 }
 
 function wireTimelineInput() {
@@ -616,12 +778,19 @@ function wireTimelineInput() {
     const r = t.wave.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
     downX = x; moved = false;
+    const th = titleHandleHit(x, y);                // title-lane edge -> resize a title
+    if (th) {
+      drag = { kind: 'title', ...th }; dragSnapped = false;
+      selectTitle(th.i, { seek: false });
+      return;
+    }
     const h = handleHit(x, y);
-    if (h) {                                        // grab an edge -> resize, don't scrub
-      drag = h; dragSnapped = false;
+    if (h) {                                        // perf edge -> resize, don't scrub
+      drag = { kind: 'perf', ...h }; dragSnapped = false;
       selectPerf(h.i, { seek: false });
       return;
     }
+    pendingClickTitle = titleHit(x, y);
     pendingClickBlock = blockHit(x, y);
     scrubbing = true;
     seekAll(xToTime(x));
@@ -640,23 +809,33 @@ function wireTimelineInput() {
   window.addEventListener('mouseup', () => {
     if (drag) {                                     // finalize resize, keep selection, autosave
       if (dragSnapped) {                            // only if it actually moved
-        const p = State.perfs[drag.i];
-        State.perfs.sort((a, b) => a.in - b.in);
-        State.selected = State.perfs.indexOf(p);
+        const arr = drag.kind === 'title' ? State.titles : State.perfs;
+        const p = arr[drag.i];
+        arr.sort((a, b) => a.in - b.in);
         markDirty();
-        selectPerf(State.selected, { seek: false });
+        if (drag.kind === 'title') {
+          State.selectedTitle = arr.indexOf(p);
+          selectTitle(State.selectedTitle, { seek: false });
+        } else {
+          State.selected = arr.indexOf(p);
+          selectPerf(State.selected, { seek: false });
+        }
       }
       drag = null;
       return;
     }
-    if (scrubbing && !moved && pendingClickBlock >= 0) selectPerf(pendingClickBlock, { seek: false });
-    scrubbing = false; pendingClickBlock = -1;
+    if (scrubbing && !moved) {
+      if (pendingClickTitle >= 0) selectTitle(pendingClickTitle, { seek: false });
+      else if (pendingClickBlock >= 0) selectPerf(pendingClickBlock, { seek: false });
+    }
+    scrubbing = false; pendingClickBlock = -1; pendingClickTitle = -1;
   });
-  // cursor hint when hovering an edge handle
+  // cursor hint when hovering an edge handle (perf or title)
   t.wave.addEventListener('mousemove', (e) => {
     if (drag || scrubbing) return;
     const r = t.wave.getBoundingClientRect();
-    t.wave.style.cursor = handleHit(e.clientX - r.left, e.clientY - r.top) ? 'ew-resize' : 'default';
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    t.wave.style.cursor = (handleHit(x, y) || titleHandleHit(x, y)) ? 'ew-resize' : 'default';
   });
 
   let panning = false;
@@ -803,6 +982,7 @@ function wireTranscript() {
 function pushUndo() {
   State.undoStack.push({
     perfs: State.perfs.map(p => ({ ...p })),
+    titles: State.titles.map(t => ({ ...t })),
     seed: State.seed,
   });
   if (State.undoStack.length > 100) State.undoStack.shift();
@@ -813,13 +993,15 @@ function undo() {
   const snap = State.undoStack.pop();
   if (!snap) return;
   State.perfs = snap.perfs.map(p => ({ ...p }));
+  State.titles = (snap.titles || []).map(t => ({ ...t }));
   State.seed = snap.seed;
   $('#seedInput').value = snap.seed;
   State.selected = -1;
+  State.selectedTitle = -1;
   clearForm();
   State.pendingIn = State.pendingOut = null;
   refreshPending();
-  renderPerfs(); renderBlocks();
+  renderPerfs(); renderTitles(); renderBlocks();
   markDirty();                 // persist the reverted state
   updateUndoBtn();
 }
@@ -861,6 +1043,9 @@ async function save({ auto = false } = {}) {
     audio_source: $('#audioSource').value,
     performances: State.perfs.map(p => ({
       title: p.title, composer: p.composer, in: p.in, out: p.out,
+    })),
+    titles: State.titles.map(t => ({
+      text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,
     })),
   };
   _saveInFlight = true;
@@ -944,15 +1129,17 @@ function applyMarkers(m) {
   State.seed = (m && m.seed) || 42;
   $('#seedInput').value = State.seed;
   State.perfs = (m && m.performances) ? m.performances.slice() : [];
+  State.titles = (m && m.titles) ? m.titles.slice() : [];
   const sel = $('#audioSource');
   if (m && m.audio_source && sel && [...sel.options].some(o => o.value === m.audio_source)) {
     sel.value = m.audio_source;
   }
   State.selected = -1;
+  State.selectedTitle = -1;
   State.pendingIn = State.pendingOut = null;
   clearForm();
   refreshPending();
-  renderPerfs(); renderBlocks();
+  renderPerfs(); renderTitles(); renderBlocks();
 }
 
 async function restoreBackup(id, label) {
@@ -999,6 +1186,7 @@ function wireKeys() {
       case 'i': case 'I': markIn(); break;
       case 'o': case 'O': markOut(); break;
       case 'Enter': addPending(); break;
+      case 't': case 'T': addTitle(); break;
       case 'p': case 'P': previewSelected(); break;
       case '=': case '+': e.preventDefault(); zoomAround(playTime(), 0.6); break;
       case '-': case '_': e.preventDefault(); zoomAround(playTime(), 1 / 0.6); break;
@@ -1023,6 +1211,9 @@ window.addEventListener('beforeunload', (e) => {
     audio_source: $('#audioSource').value,
     performances: State.perfs.map(p => ({
       title: p.title, composer: p.composer, in: p.in, out: p.out,
+    })),
+    titles: State.titles.map(t => ({
+      text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,
     })),
   };
   navigator.sendBeacon('/api/markers', new Blob([JSON.stringify(payload)], { type: 'application/json' }));

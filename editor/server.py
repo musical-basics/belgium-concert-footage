@@ -87,6 +87,17 @@ _SCHEMA = """
         in_s     REAL NOT NULL,
         out_s    REAL NOT NULL
     );
+    -- On-screen text overlays ("titles"), each shown over the final render for
+    -- its [in_s, out_s] window (global concert seconds). `subtitle` is an
+    -- optional second line. Burned in by render/render.py via drawtext.
+    CREATE TABLE IF NOT EXISTS titles (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        ordinal  INTEGER NOT NULL,
+        text     TEXT,
+        subtitle TEXT,
+        in_s     REAL NOT NULL,
+        out_s    REAL NOT NULL
+    );
     -- Each row is a full JSON snapshot of the project + all regions, taken
     -- automatically every BACKUP_EVERY writes. `day` is the local YYYY-MM-DD
     -- the snapshot was taken, used by the prune step to keep one-per-day.
@@ -134,8 +145,10 @@ def db_init():
                         existing = json.load(f)
                     seed.update({k: existing[k] for k in DEFAULT_PROJECT if k in existing})
                     _write_performances(conn, existing.get("performances", []))
+                    _write_titles(conn, existing.get("titles", []))
                     print(f"Seeded markers.db from {MARKERS_PATH} "
-                          f"({len(existing.get('performances', []))} performances)")
+                          f"({len(existing.get('performances', []))} performances, "
+                          f"{len(existing.get('titles', []))} titles)")
                 except Exception as e:
                     print(f"Could not seed from markers.json: {e}")
             conn.execute(
@@ -156,8 +169,18 @@ def _write_performances(conn, perfs):
     )
 
 
+def _write_titles(conn, titles):
+    conn.execute("DELETE FROM titles")
+    conn.executemany(
+        "INSERT INTO titles (ordinal, text, subtitle, in_s, out_s) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(i, t.get("text"), t.get("subtitle"), t.get("in"), t.get("out"))
+         for i, t in enumerate(titles)],
+    )
+
+
 def _load(conn):
-    """Read the full project payload (meta + performances) from an open conn."""
+    """Read the full project payload (meta + performances + titles)."""
     prow = conn.execute(
         "SELECT seed, project, fps, duration, audio_source FROM project WHERE id = 1"
     ).fetchone()
@@ -166,6 +189,12 @@ def _load(conn):
         {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"]}
         for r in conn.execute(
             "SELECT title, composer, in_s, out_s FROM performances ORDER BY ordinal"
+        )
+    ]
+    meta["titles"] = [
+        {"text": r["text"], "subtitle": r["subtitle"], "in": r["in_s"], "out": r["out_s"]}
+        for r in conn.execute(
+            "SELECT text, subtitle, in_s, out_s FROM titles ORDER BY ordinal"
         )
     ]
     return meta
@@ -263,6 +292,7 @@ def db_save(data):
                  data.get("duration"), data.get("audio_source")),
             )
             _write_performances(conn, data.get("performances", []))
+            _write_titles(conn, data.get("titles", []))
             # Snapshot every Nth write, then trim per the retention policy. Done
             # inside the same transaction so a backup never reflects half a save.
             count = _bump_write_count(conn)

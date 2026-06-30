@@ -40,6 +40,9 @@ SOURCES = {
 }
 W, H, FPS = 1920, 1080, 60
 
+# Font used to burn in the on-screen titles (drawtext). Any .ttf on the box.
+TITLE_FONT = "/System/Library/Fonts/Supplemental/Arial.ttf"
+
 
 def src_path(cam):
     return os.path.join(ROOT, SOURCES[cam])
@@ -80,7 +83,50 @@ def vf_for(cam):
     return f"{eq},{VF}" if eq else VF
 
 
-def render_performance(perf, index, seed, audio_cam, encoder, dry):
+def _fade_alpha(a, b, fd):
+    """drawtext alpha expression: fade in over `fd`s after a, hold, fade out
+    over `fd`s before b. `t` is the output (local) timestamp in seconds."""
+    return (f"alpha='if(lt(t,{a:.3f}),0,"
+            f"if(lt(t,{a + fd:.3f}),(t-{a:.3f})/{fd:.3f},"
+            f"if(lt(t,{b - fd:.3f}),1,"
+            f"if(lt(t,{b:.3f}),({b:.3f}-t)/{fd:.3f},0))))'")
+
+
+def title_filter(perf_titles, t_in, t_out, work_dir):
+    """Build a drawtext filterchain for the titles overlapping this performance.
+
+    Times in markers are global concert seconds; the rendered clip restarts at
+    0, so each title's window is shifted by -t_in. Text is written to sidecar
+    files and pulled in with textfile= so titles with quotes/colons/commas need
+    no escaping. Returns '' when nothing overlaps.
+    """
+    parts = []
+    for n, ttl in enumerate(perf_titles):
+        a = max(0.0, float(ttl["in"]) - t_in)
+        b = min(t_out, float(ttl["out"])) - t_in
+        if b - a <= 0.05:
+            continue
+        fd = min(0.4, max(0.05, (b - a) / 2))
+        text = (ttl.get("text") or "").strip()
+        sub = (ttl.get("subtitle") or "").strip()
+        common = (f"fontfile='{TITLE_FONT}':fontcolor=white:borderw=3:"
+                  f"bordercolor=black@0.9:shadowcolor=black@0.55:shadowx=2:shadowy=2:"
+                  f"x=(w-text_w)/2:enable='between(t,{a:.3f},{b:.3f})':{_fade_alpha(a, b, fd)}")
+        if text:
+            tf = os.path.join(work_dir, f"title_{n}_main.txt")
+            with open(tf, "w") as f:
+                f.write(text)
+            y = "(h*0.74)" if sub else "(h*0.80)"
+            parts.append(f"drawtext=textfile='{tf}':fontsize=h/16:y={y}:{common}")
+        if sub:
+            tf = os.path.join(work_dir, f"title_{n}_sub.txt")
+            with open(tf, "w") as f:
+                f.write(sub)
+            parts.append(f"drawtext=textfile='{tf}':fontsize=h/27:y=(h*0.84):{common}")
+    return ",".join(parts)
+
+
+def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=()):
     t_in, t_out = float(perf["in"]), float(perf["out"])
     title = perf.get("title", "Untitled")
     name = f"{index+1:02d}_{slugify(title)}"
@@ -92,10 +138,24 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry):
     print(f"  plan: {stats['segments']} segments  "
           f"({stats['audio_cuts']} audio-snapped, {stats['heuristic_cuts']} heuristic cuts)")
 
+    # Titles whose window overlaps this performance, with times shifted to the
+    # clip's local (0-based) timeline for the overlay/plan.
+    perf_titles = [
+        {"text": tt.get("text", ""), "subtitle": tt.get("subtitle", ""),
+         "in": float(tt["in"]), "out": float(tt["out"]),
+         "local_in": round(max(0.0, float(tt["in"]) - t_in), 3),
+         "local_out": round(min(t_out, float(tt["out"])) - t_in, 3)}
+        for tt in titles
+        if float(tt["out"]) > t_in and float(tt["in"]) < t_out
+    ]
+    if perf_titles:
+        print(f"  titles: {len(perf_titles)} overlay(s) — "
+              + ", ".join(f'"{t["text"]}"' for t in perf_titles))
+
     plan = {
         "performance": index + 1, "title": title, "composer": perf.get("composer", ""),
         "in": t_in, "out": t_out, "seed": seed, "audio_source": audio_cam,
-        "stats": stats, "segments": segments,
+        "stats": stats, "segments": segments, "titles": perf_titles,
     }
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(os.path.join(OUT_DIR, name + ".plan.json"), "w") as f:
@@ -105,6 +165,9 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry):
         for s in segments:
             print(f"    {s['start']:8.2f} -> {s['end']:8.2f}  "
                   f"{s['camera']:10s} [{s['cut_type']}]")
+        for tt in perf_titles:
+            print(f"    title {tt['local_in']:8.2f} -> {tt['local_out']:8.2f}  "
+                  f'"{tt["text"]}"' + (f" / {tt['subtitle']}" if tt["subtitle"] else ""))
         return
 
     # 1) cut each segment from its camera's original file
@@ -137,10 +200,19 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry):
          "-vn", "-c:a", "aac", "-b:a", "256k", "-ar", "48000", audio_only])
 
     out_path = os.path.join(OUT_DIR, name + ".mp4")
-    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-         "-i", video_only, "-i", audio_only,
-         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "copy",
-         "-dn", "-write_tmcd", "0", "-movflags", "+faststart", "-shortest", out_path])
+    title_vf = title_filter(perf_titles, t_in, t_out, seg_dir) if perf_titles else ""
+    if title_vf:
+        # Burn the titles in -> the video must be re-encoded (can't stream-copy).
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-i", video_only, "-i", audio_only,
+             "-map", "0:v:0", "-map", "1:a:0",
+             "-vf", title_vf, *enc, "-r", str(FPS), "-c:a", "copy",
+             "-dn", "-write_tmcd", "0", "-movflags", "+faststart", "-shortest", out_path])
+    else:
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-i", video_only, "-i", audio_only,
+             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "copy",
+             "-dn", "-write_tmcd", "0", "-movflags", "+faststart", "-shortest", out_path])
     print(f"  ✓ {out_path}")
 
 
@@ -161,17 +233,19 @@ def main():
     seed = int(data.get("seed", 42))
     audio_cam = args.audio or data.get("audio_source", "back")
     perfs = data.get("performances", [])
+    titles = data.get("titles", [])
     if not perfs:
         sys.exit("No performances in markers.json.")
 
     only = {int(x) for x in args.only.split(",") if x.strip()} if args.only else None
     print(f"seed={seed}  audio={audio_cam}  encoder={args.encoder}  "
-          f"performances={len(perfs)}" + (f"  only={sorted(only)}" if only else ""))
+          f"performances={len(perfs)}  titles={len(titles)}"
+          + (f"  only={sorted(only)}" if only else ""))
 
     for i, perf in enumerate(perfs):
         if only and (i + 1) not in only:
             continue
-        render_performance(perf, i, seed, audio_cam, args.encoder, args.dry_run)
+        render_performance(perf, i, seed, audio_cam, args.encoder, args.dry_run, titles)
 
     print("\nDone." + ("  (dry run — no video encoded)" if args.dry_run else f"  Output in {OUT_DIR}/"))
 

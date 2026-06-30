@@ -9,6 +9,7 @@
   --accent2: #34d399;
   --danger: #ef4444;
   --warn: #f59e0b;
+  --title: #c084fc;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
@@ -26,6 +27,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 button:disabled:hover { border-color: var(--line); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 button.mark { background: var(--panel2); border-color: var(--warn); color: var(--warn); }
+button.title-btn { background: var(--panel2); border-color: var(--title); color: var(--title); font-weight: 600; }
+button.title-btn:hover { border-color: var(--title); background: rgba(192,132,252,0.12); }
 button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
 button.small { padding: 4px 8px; font-size: 12px; }
 input, select {
@@ -82,7 +85,8 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
   border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; cursor: pointer;
 }
 
-#panel { flex: 1; display: grid; grid-template-columns: 1fr 1.2fr; gap: 12px; overflow: hidden; }
+#panel { flex: 1; display: grid; grid-template-columns: 1fr 1.2fr 1fr; gap: 12px; overflow: hidden; }
+.cardhint { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 0 0 10px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px; overflow: auto; }
 .card h3 { margin: 0 0 10px; font-size: 13px; }
 .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
@@ -107,6 +111,26 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 #perfList li .rowbtns { display: flex; gap: 4px; flex-shrink: 0; }
 #perfList li .rowbtns button { padding: 2px 8px; font-size: 11px; }
 #perfList li .rowbtns button.danger { padding: 2px 7px; }
+
+/* ---- titles list ---- */
+#titleList { list-style: none; margin: 0; padding: 0; }
+#titleList li {
+  display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid var(--line);
+  border-radius: 7px; margin-bottom: 6px; background: var(--panel2); cursor: pointer;
+}
+#titleList li.sel { border-color: var(--title); }
+#titleList li .tnum { color: var(--title); width: 16px; text-align: right; flex-shrink: 0; }
+#titleList li .tmeta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+#titleList li .ttext {
+  background: #0c0e13; border: 1px solid var(--line); border-radius: 5px;
+  color: var(--text); padding: 4px 7px; font-size: 12px; width: 100%;
+}
+#titleList li .ttext.tsub { color: var(--muted); font-size: 11px; }
+#titleList li .ttime { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 10px; }
+#titleList li .tdur { color: var(--title); font-variant-numeric: tabular-nums; font-size: 11px; flex-shrink: 0; }
+#titleList li .rowbtns { display: flex; gap: 4px; flex-shrink: 0; }
+#titleList li .rowbtns button { padding: 2px 8px; font-size: 11px; }
+.title-empty { color: var(--muted); padding: 10px 4px; text-align: center; font-size: 12px; }
 
 /* ---- caption transcript (below the timeline) ---- */
 #transcriptWrap {
