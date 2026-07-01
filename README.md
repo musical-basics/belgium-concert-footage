@@ -92,6 +92,15 @@ editor:
 The `Audio:` dropdown only changes which angle you *hear while marking* — the
 final render's audio bed is set separately (default: Back Camera).
 
+### "Which camera is shown" indicator
+
+Once a performance has been rendered/exported, the editor reads its cut plan
+(`output/NN_*.plan.json`) and, as you play/scrub, puts a **yellow ring + "▶ SHOWN"
+badge** around whichever camera pane the render cuts to at that moment — so you
+can see the deterministic multi-cam edit without opening the output file. It
+reflects the *last render's* timestamps (re-export after changing markers/seed to
+refresh it); panes stay unringed for performances that haven't been rendered yet.
+
 ## 3. Render the performance videos
 
 ```bash

@@ -369,6 +369,31 @@ def output_file_map():
     return files
 
 
+def render_plans():
+    """The cut plans the renderer wrote (output/*.plan.json), trimmed to what the
+    editor needs to show which camera is on screen at any moment: each plan's
+    global [in, out] window plus its segments (clip-local start/end + camera).
+    Lets the GUI mirror the deterministic edit without re-running audio analysis."""
+    plans = []
+    if not os.path.isdir(OUT_DIR):
+        return plans
+    for fn in sorted(os.listdir(OUT_DIR)):
+        if not fn.endswith(".plan.json"):
+            continue
+        try:
+            with open(os.path.join(OUT_DIR, fn)) as f:
+                p = json.load(f)
+            plans.append({
+                "in": p.get("in"), "out": p.get("out"),
+                "performance": p.get("performance"), "title": p.get("title"),
+                "segments": [{"start": s["start"], "end": s["end"], "camera": s["camera"]}
+                             for s in p.get("segments", [])],
+            })
+        except Exception:
+            continue          # skip a malformed/partial plan file
+    return plans
+
+
 def exports_status():
     """Snapshot of every export job: status, elapsed seconds, output filename."""
     with _EXPORTS_LOCK:
@@ -504,6 +529,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/exports":
             return self._send_json({"exports": exports_status(),
                                     "files": output_file_map()})
+        if path == "/api/plans":
+            return self._send_json({"plans": render_plans()})
         if path == "/api/waveform":
             if os.path.isfile(WAVE_META) and os.path.isfile(WAVE_BIN):
                 with open(WAVE_META) as f:

@@ -33,6 +33,8 @@ const State = {
   selected: -1,
   exports: {},         // 1-based index -> {status, elapsed, file, error} (export jobs)
   outputs: {},         // 1-based index -> existing output filename on disk
+  plans: [],           // rendered cut plans: [{in,out,segments:[{start,end,camera}]}]
+  activeCam: null,     // camera id shown at the current playhead (per the plan)
   titles: [],          // on-screen text overlays {text, subtitle, in, out, x, y}
   selectedTitle: -1,
   titleOverlays: [],   // per-camera-pane preview overlays [{box,block,main,sub,video}]
@@ -107,8 +109,34 @@ async function boot() {
   wireBackups();
   wireKeys();
   pollExports();           // pick up any export already running
+  loadPlans();             // rendered cut plans -> "which camera is shown" indicator
   tickLoop();
   updateStatus();
+}
+
+// The renderer writes a deterministic cut plan per performance; load them so the
+// editor can highlight which camera is on screen at the playhead. Plans exist
+// only for performances that have been rendered/exported.
+async function loadPlans() {
+  try {
+    const data = await fetch('/api/plans').then(r => r.json());
+    State.plans = (data.plans || []).filter(p => p.in != null && p.out != null)
+      .sort((a, b) => a.in - b.in);
+  } catch { /* leave the previous plans in place */ }
+}
+
+// Camera id shown at global time t per the rendered plan, or null if no plan
+// covers t (that performance hasn't been rendered yet).
+function activeCameraAt(t) {
+  for (const p of State.plans) {
+    if (t < p.in || t > p.out) continue;
+    const local = t - p.in;
+    for (const s of p.segments) {
+      if (local >= s.start && local < s.end) return s.camera;
+    }
+    return null;
+  }
+  return null;
 }
 
 async function loadWaveform() {
@@ -233,6 +261,18 @@ function updateTitleOverlay(t) {
   }
 }
 
+// Highlight the camera pane that the render shows at time t (yellow ring), per
+// the loaded cut plan. No-op cost when nothing changed.
+function updateActiveCam(t) {
+  const cam = activeCameraAt(t);
+  if (cam === State.activeCam) return;
+  State.activeCam = cam;
+  State.clips.forEach((c, i) => {
+    const track = State.videos[i] && State.videos[i].closest('.track');
+    if (track) track.classList.toggle('cam-active', c.id === cam);
+  });
+}
+
 // Drag the title block on any pane to set the active title's normalized x/y.
 let _posDrag = null;     // { box } of the pane being dragged on
 function startTitlePosDrag(e, ov) {
@@ -331,6 +371,7 @@ function tickLoop() {
   }
   drawTimeline(t);
   updateTitleOverlay(t);
+  updateActiveCam(t);
   updateTranscriptHighlight(t);
   requestAnimationFrame(tickLoop);
 }
@@ -1103,7 +1144,7 @@ async function pollExports() {
   // Flash the topbar when a job finishes.
   for (const [idx, job] of Object.entries(State.exports)) {
     const was = _expPrev[idx];
-    if (was !== job.status && job.status === 'done') flashStatus(`✓ exported ${job.file || `#${idx}`}`);
+    if (was !== job.status && job.status === 'done') { flashStatus(`✓ exported ${job.file || `#${idx}`}`); loadPlans(); }
     if (was !== job.status && job.status === 'error') flashStatus(`⚠ export #${idx} failed`);
   }
   _expPrev = Object.fromEntries(Object.entries(State.exports).map(([k, v]) => [k, v.status]));

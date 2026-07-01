@@ -82,6 +82,13 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
   border-radius: 8px; overflow: hidden; display: flex; flex-direction: column;
 }
 .track.audio-active { border-color: var(--accent2); }
+/* the camera the render shows at the playhead (per the cut plan) */
+.track.cam-active { border-color: var(--warn); box-shadow: 0 0 0 2px var(--warn), 0 0 16px rgba(245,158,11,0.45); z-index: 1; }
+.track.cam-active::after {
+  content: "▶ SHOWN"; position: absolute; top: 6px; right: 8px; z-index: 3;
+  background: var(--warn); color: #201400; font-weight: 700; font-size: 10px;
+  letter-spacing: .04em; padding: 2px 7px; border-radius: 5px;
+}
 .track video { width: 100%; height: 100%; object-fit: contain; background:#000; flex:1; min-height:0; }
 .track .tlabel {
   position: absolute; top: 6px; left: 8px; z-index: 2; font-size: 11px;
