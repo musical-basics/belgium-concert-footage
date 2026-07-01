@@ -32,6 +32,7 @@ const State = {
   perfs: [],
   selected: -1,
   exports: {},         // 1-based index -> {status, elapsed, file, error} (export jobs)
+  outputs: {},         // 1-based index -> existing output filename on disk
   titles: [],          // on-screen text overlays {text, subtitle, in, out, x, y}
   selectedTitle: -1,
   titleOverlays: [],   // per-camera-pane preview overlays [{box,block,main,sub,video}]
@@ -1047,27 +1048,27 @@ function renderPerfs() {
 let _expPollTimer = null;
 let _expPrev = {};
 
-function applyExportState(li, job) {
+function applyExportState(li) {
   const exp = li.querySelector('[data-act=export]');
   const open = li.querySelector('[data-act=open]');
   if (!exp) return;
+  const idx = exp.dataset.idx;
+  const job = State.exports[idx];
   exp.classList.remove('busy', 'err');
   const st = job && job.status;
   if (st === 'queued')        { exp.textContent = '⏳ queued';            exp.disabled = true;  exp.classList.add('busy'); }
   else if (st === 'running')  { exp.textContent = `⏳ ${job.elapsed || 0}s`; exp.disabled = true;  exp.classList.add('busy'); }
   else if (st === 'error')    { exp.textContent = '⚠ Retry';             exp.disabled = false; exp.classList.add('err'); }
   else                        { exp.textContent = '⤓ Export';            exp.disabled = false; }
-  // Show the ▶ open button once a file exists (persists so it can be reopened).
-  const hasFile = job && job.file;
-  open.hidden = !hasFile;
-  if (hasFile) { open.dataset.file = job.file; open.title = `Open ${job.file}`; }
+  // Show ▶ whenever a render exists on disk — this session's job file, or one
+  // already in output/ (from a batch render or a prior session).
+  const file = (job && job.file) || State.outputs[idx];
+  open.hidden = !file;
+  if (file) { open.dataset.file = file; open.title = `Open ${file}`; }
 }
 
 function updateExportRows() {
-  document.querySelectorAll('#perfList li').forEach((li) => {
-    const exp = li.querySelector('[data-act=export]');
-    if (exp) applyExportState(li, State.exports[exp.dataset.idx]);
-  });
+  document.querySelectorAll('#perfList li').forEach(applyExportState);
 }
 
 async function exportPerf(i) {
@@ -1095,8 +1096,9 @@ async function pollExports() {
   _expPollTimer = null;
   let data;
   try { data = await fetch('/api/exports').then(r => r.json()); }
-  catch { data = { exports: {} }; }
+  catch { data = { exports: {}, files: {} }; }
   State.exports = data.exports || {};
+  State.outputs = data.files || {};
   updateExportRows();
   // Flash the topbar when a job finishes.
   for (const [idx, job] of Object.entries(State.exports)) {

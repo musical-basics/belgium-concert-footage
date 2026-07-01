@@ -58,6 +58,13 @@ def guess_type(path):
     return CONTENT_TYPES.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
 
 
+def slugify(s):
+    # Mirror render.py's slugify so predicted output filenames match what a
+    # render actually writes (NN_slug.mp4).
+    s = re.sub(r"[^\w\s-]", "", s or "").strip().lower()
+    return re.sub(r"[\s_-]+", "-", s) or "untitled"
+
+
 # ---- persistence (SQLite, source of truth) ---------------------------
 # markers.db is the durable store. Each save also mirrors to markers.json so
 # render/render.py keeps reading a plain file. A new connection is opened per
@@ -345,6 +352,23 @@ def start_export(index):
     return True
 
 
+def output_file_map():
+    """Map 1-based performance index -> existing output filename, so the editor
+    can show an 'open' affordance for any performance already rendered on disk
+    (not just ones exported this session). Uses render.py's exact naming."""
+    files = {}
+    try:
+        with db_connect() as conn:
+            perfs = _load(conn)["performances"]
+    except Exception:
+        perfs = []
+    for i, p in enumerate(perfs):
+        name = f"{i+1:02d}_{slugify(p.get('title'))}.mp4"
+        if os.path.isfile(os.path.join(OUT_DIR, name)):
+            files[i + 1] = name
+    return files
+
+
 def exports_status():
     """Snapshot of every export job: status, elapsed seconds, output filename."""
     with _EXPORTS_LOCK:
@@ -478,7 +502,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/backups":
             return self._send_json({"backups": list_backups()})
         if path == "/api/exports":
-            return self._send_json({"exports": exports_status()})
+            return self._send_json({"exports": exports_status(),
+                                    "files": output_file_map()})
         if path == "/api/waveform":
             if os.path.isfile(WAVE_META) and os.path.isfile(WAVE_BIN):
                 with open(WAVE_META) as f:
