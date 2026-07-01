@@ -113,11 +113,17 @@
     <div class="card">
       <div class="card-head">
         <h3>Titles (<span id="titleCount">0</span>)</h3>
+        <span class="tfont-global" title="Global title font size (all cards)">
+          Font <button id="gFontDec" class="small">A−</button>
+          <span id="gFontScale">100%</span>
+          <button id="gFontInc" class="small">A+</button>
+        </span>
         <button id="addTitleBtn2" class="title-btn small">+ Create title</button>
       </div>
       <p class="cardhint">Text overlays burned into the final render. Create one,
         then drag its handles on the timeline to set how long it shows. Drag the
-        title <b>on the video</b> to position it; <b>⌖</b> recenters.</p>
+        title <b>on the video</b> to position it; <b>⌖</b> recenters. <b>A− / A+</b>
+        sizes one card; the header <b>Font</b> control scales them all.</p>
       <ol id="titleList"></ol>
     </div>
   </section>

@@ -12,6 +12,7 @@ Local editor server for the Belgium Concert Highlights project.
 Run:  python3 editor/server.py   then open http://localhost:8000
 No third-party dependencies.
 """
+import hmac
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -36,6 +38,14 @@ WAVE_META = os.path.join(ROOT, "cache", "waveform.json")
 TRANSCRIPT_PATH = os.path.join(ROOT, "cache", "transcript.json")
 
 PORT = int(os.environ.get("EDITOR_PORT", "8000"))
+
+# Shared-secret auth. When EDITOR_TOKEN is set (production/public deploy), every
+# /api/* request, proxy video, and waveform must present the token — via
+# "Authorization: Bearer <token>", an "X-Auth-Token" header, or a "?token=..."
+# query param (needed for <video>/<img> which can't set headers). Left unset in
+# local dev -> no auth. The static shell (index.html/app.js/css) stays open so
+# the login prompt can load; it holds no secrets on its own.
+AUTH_TOKEN = os.environ.get("EDITOR_TOKEN", "").strip()
 
 # Logical clip ids -> proxy filename and display label. Order = track order.
 CLIPS = [
@@ -78,6 +88,7 @@ DEFAULT_PROJECT = {
     "fps": 60,
     "duration": 5764.7,
     "audio_source": "back",
+    "title_scale": 1.0,
 }
 
 
@@ -88,7 +99,8 @@ _SCHEMA = """
         project      TEXT,
         fps          REAL,
         duration     REAL,
-        audio_source TEXT
+        audio_source TEXT,
+        title_scale  REAL DEFAULT 1.0
     );
     CREATE TABLE IF NOT EXISTS performances (
         id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,7 +121,8 @@ _SCHEMA = """
         in_s     REAL NOT NULL,
         out_s    REAL NOT NULL,
         x_pos    REAL,
-        y_pos    REAL
+        y_pos    REAL,
+        scale    REAL
     );
     -- Each row is a full JSON snapshot of the project + all regions, taken
     -- automatically every BACKUP_EVERY writes. `day` is the local YYYY-MM-DD
@@ -142,11 +155,15 @@ def db_connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
-    # Migrate older DBs whose titles table predates the x/y position columns.
+    # Migrate older DBs whose titles table predates the x/y/scale columns.
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(titles)")}
-    for col in ("x_pos", "y_pos"):
+    for col in ("x_pos", "y_pos", "scale"):
         if col not in cols:
             conn.execute(f"ALTER TABLE titles ADD COLUMN {col} REAL")
+    # ...and the project's global title font scale.
+    pcols = {r["name"] for r in conn.execute("PRAGMA table_info(project)")}
+    if "title_scale" not in pcols:
+        conn.execute("ALTER TABLE project ADD COLUMN title_scale REAL")
     return conn
 
 
@@ -190,10 +207,10 @@ def _write_performances(conn, perfs):
 def _write_titles(conn, titles):
     conn.execute("DELETE FROM titles")
     conn.executemany(
-        "INSERT INTO titles (ordinal, text, subtitle, in_s, out_s, x_pos, y_pos) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO titles (ordinal, text, subtitle, in_s, out_s, x_pos, y_pos, scale) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [(i, t.get("text"), t.get("subtitle"), t.get("in"), t.get("out"),
-          t.get("x"), t.get("y"))
+          t.get("x"), t.get("y"), t.get("scale"))
          for i, t in enumerate(titles)],
     )
 
@@ -201,9 +218,12 @@ def _write_titles(conn, titles):
 def _load(conn):
     """Read the full project payload (meta + performances + titles)."""
     prow = conn.execute(
-        "SELECT seed, project, fps, duration, audio_source FROM project WHERE id = 1"
+        "SELECT seed, project, fps, duration, audio_source, title_scale "
+        "FROM project WHERE id = 1"
     ).fetchone()
     meta = dict(prow) if prow else dict(DEFAULT_PROJECT)
+    if meta.get("title_scale") is None:      # NULL on rows predating the column
+        meta["title_scale"] = 1.0
     meta["performances"] = [
         {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"]}
         for r in conn.execute(
@@ -212,9 +232,9 @@ def _load(conn):
     ]
     meta["titles"] = [
         {"text": r["text"], "subtitle": r["subtitle"], "in": r["in_s"], "out": r["out_s"],
-         "x": r["x_pos"], "y": r["y_pos"]}
+         "x": r["x_pos"], "y": r["y_pos"], "scale": r["scale"]}
         for r in conn.execute(
-            "SELECT text, subtitle, in_s, out_s, x_pos, y_pos FROM titles ORDER BY ordinal"
+            "SELECT text, subtitle, in_s, out_s, x_pos, y_pos, scale FROM titles ORDER BY ordinal"
         )
     ]
     return meta
@@ -428,34 +448,85 @@ def exports_status():
         return out
 
 
+def _persist(conn, data):
+    """Write a full project payload into an open connection (project + regions),
+    plus the periodic backup. Caller holds _DB_LOCK and the transaction."""
+    conn.execute(
+        "INSERT INTO project (id, seed, project, fps, duration, audio_source, title_scale) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "seed=excluded.seed, project=excluded.project, fps=excluded.fps, "
+        "duration=excluded.duration, audio_source=excluded.audio_source, "
+        "title_scale=excluded.title_scale",
+        (data.get("seed", 42), data.get("project"), data.get("fps"),
+         data.get("duration"), data.get("audio_source"),
+         data.get("title_scale", 1.0)),
+    )
+    _write_performances(conn, data.get("performances", []))
+    _write_titles(conn, data.get("titles", []))
+    # Snapshot every Nth write, then trim per the retention policy. Done inside
+    # the same transaction so a backup never reflects half a save.
+    count = _bump_write_count(conn)
+    if count % BACKUP_EVERY == 0:
+        _create_backup(conn, _load(conn), count, datetime.now())
+        _prune_backups(conn)
+
+
+def _mirror_markers():
+    """Write the canonical view back out to markers.json for the render pipeline."""
+    mirror = db_load()
+    tmp = MARKERS_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(mirror, f, indent=2)
+    os.replace(tmp, MARKERS_PATH)
+    return mirror
+
+
 def db_save(data):
     """Persist a full project payload, then mirror to markers.json."""
     with _DB_LOCK:
         with db_connect() as conn:
-            conn.execute(
-                "INSERT INTO project (id, seed, project, fps, duration, audio_source) "
-                "VALUES (1, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET "
-                "seed=excluded.seed, project=excluded.project, fps=excluded.fps, "
-                "duration=excluded.duration, audio_source=excluded.audio_source",
-                (data.get("seed", 42), data.get("project"), data.get("fps"),
-                 data.get("duration"), data.get("audio_source")),
-            )
-            _write_performances(conn, data.get("performances", []))
-            _write_titles(conn, data.get("titles", []))
-            # Snapshot every Nth write, then trim per the retention policy. Done
-            # inside the same transaction so a backup never reflects half a save.
-            count = _bump_write_count(conn)
-            if count % BACKUP_EVERY == 0:
-                _create_backup(conn, _load(conn), count, datetime.now())
-                _prune_backups(conn)
-        # Mirror the canonical view back out for the render pipeline.
-        mirror = db_load()
-        tmp = MARKERS_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(mirror, f, indent=2)
-        os.replace(tmp, MARKERS_PATH)
-        return mirror
+            _persist(conn, data)
+        return _mirror_markers()
+
+
+def db_mutate(fn):
+    """Atomic read-modify-write of the whole project under the lock: fn(data)
+    mutates the loaded payload in place, then it's persisted + mirrored. Used by
+    the additive title API so concurrent agent/editor writes can't clobber."""
+    with _DB_LOCK:
+        with db_connect() as conn:
+            data = _load(conn)
+            fn(data)
+            _persist(conn, data)
+        return _mirror_markers()
+
+
+def _clean_title(t):
+    """Validate + normalize one title from the agent API. Requires numeric in/out
+    (out > in); text/subtitle/x/y/scale optional. Raises ValueError on bad input."""
+    if not isinstance(t, dict):
+        raise ValueError("each title must be a JSON object")
+    try:
+        tin, tout = float(t["in"]), float(t["out"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("title needs numeric 'in' and 'out' (seconds)")
+    if tout <= tin:
+        raise ValueError("title 'out' must be greater than 'in'")
+
+    def _opt(key):
+        v = t.get(key)
+        return None if v is None else float(v)
+
+    clean = {
+        "text": str(t.get("text") or ""),
+        "subtitle": str(t.get("subtitle") or ""),
+        "in": round(tin, 3), "out": round(tout, 3),
+        "x": _opt("x"), "y": _opt("y"),
+    }
+    if t.get("scale") is not None:
+        clean["scale"] = float(t["scale"])
+    return clean
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -473,6 +544,30 @@ class Handler(BaseHTTPRequestHandler):
             super().handle_one_request()
         except (ConnectionResetError, BrokenPipeError):
             self.close_connection = True
+
+    # ---- auth --------------------------------------------------------
+    def _authed(self):
+        """True if auth is disabled (no EDITOR_TOKEN) or the request carries the
+        token via Authorization: Bearer / X-Auth-Token / ?token=."""
+        if not AUTH_TOKEN:
+            return True
+        presented = None
+        h = self.headers.get("Authorization", "")
+        if h.startswith("Bearer "):
+            presented = h[7:].strip()
+        if presented is None:
+            presented = self.headers.get("X-Auth-Token", "").strip() or None
+        if presented is None:
+            q = urllib.parse.urlparse(self.path).query
+            presented = urllib.parse.parse_qs(q).get("token", [""])[0] or None
+        return presented is not None and hmac.compare_digest(presented, AUTH_TOKEN)
+
+    def _require_auth(self):
+        """Gate a protected route; sends 401 and returns False when unauthorized."""
+        if self._authed():
+            return True
+        self._send_json({"ok": False, "error": "unauthorized"}, 401)
+        return False
 
     # ---- helpers -----------------------------------------------------
     def _send_json(self, obj, status=200):
@@ -535,12 +630,19 @@ class Handler(BaseHTTPRequestHandler):
     # ---- routing -----------------------------------------------------
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        # Gate data + media; leave the static shell open so the login can load.
+        if (path.startswith("/api/") or path.startswith("/proxies/")
+                or path == "/waveform.u8") and not self._require_auth():
+            return
         if path == "/" or path == "":
             return self._serve_file(os.path.join(EDITOR_DIR, "index.html"))
         if path == "/api/meta":
             return self._send_json(self._meta())
         if path == "/api/markers":
             return self._send_json(self._load_markers())
+        if path == "/api/titles":
+            # Agent-friendly read of just the title cards.
+            return self._send_json({"titles": db_load().get("titles", [])})
         if path == "/api/backups":
             return self._send_json({"backups": list_backups()})
         if path == "/api/exports":
@@ -579,13 +681,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file(candidate)
         self.send_error(404, "Not found")
 
+    def _read_json(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length else b"{}"
+        return json.loads(raw.decode("utf-8"))
+
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if not self._require_auth():          # all POSTs mutate -> always gated
+            return
         if path == "/api/markers":
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length) if length else b"{}"
             try:
-                data = json.loads(raw.decode("utf-8"))
+                data = self._read_json()
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 400)
             try:
@@ -593,6 +700,25 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 500)
             return self._send_json({"ok": True, "saved": DB_PATH})
+        if path == "/api/titles":
+            # Additive title API for the external agent: append one title (a bare
+            # object) or many ({"titles":[...]}), without touching anything else.
+            try:
+                body = self._read_json()
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            incoming = body.get("titles") if isinstance(body, dict) and "titles" in body else [body]
+            try:
+                clean = [_clean_title(t) for t in incoming]
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            box = {}
+            def _add(data):
+                data["titles"] = (data.get("titles") or []) + clean
+                data["titles"].sort(key=lambda t: t.get("in", 0))
+                box["titles"] = data["titles"]
+            db_mutate(_add)
+            return self._send_json({"ok": True, "added": len(clean), "titles": box["titles"]})
         if path == "/api/backups/restore":
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b"{}"
@@ -629,6 +755,31 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 500)
             return self._send_json({"ok": True})
+        self.send_error(404, "Not found")
+
+    def do_DELETE(self):
+        path = self.path.split("?", 1)[0]
+        if not self._require_auth():
+            return
+        if path == "/api/titles":
+            # Remove one title by 0-based index (?index=N) from the sorted list.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                idx = int(q.get("index", [""])[0])
+            except (ValueError, TypeError):
+                return self._send_json({"ok": False, "error": "index (int) required"}, 400)
+            box = {"ok": False}
+            def _del(data):
+                titles = data.get("titles") or []
+                if 0 <= idx < len(titles):
+                    titles.pop(idx)
+                    data["titles"] = titles
+                    box["ok"] = True
+                box["titles"] = data.get("titles", [])
+            db_mutate(_del)
+            if not box["ok"]:
+                return self._send_json({"ok": False, "error": "index out of range"}, 404)
+            return self._send_json({"ok": True, "titles": box["titles"]})
         self.send_error(404, "Not found")
 
     # ---- data --------------------------------------------------------

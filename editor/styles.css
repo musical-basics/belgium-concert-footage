@@ -187,6 +187,14 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 #titleList li .rowbtns { display: flex; gap: 4px; flex-shrink: 0; }
 #titleList li .rowbtns button { padding: 2px 8px; font-size: 11px; }
 .title-empty { color: var(--muted); padding: 10px 4px; text-align: center; font-size: 12px; }
+/* per-title font size adjuster (in each title row) */
+.tfont { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.tfont button { padding: 2px 6px; font-size: 11px; color: var(--title); border-color: var(--title); }
+.tfont .tscale { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; min-width: 34px; text-align: center; }
+/* global font adjuster (title card header) */
+.tfont-global { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; margin-left: auto; }
+.tfont-global button { padding: 2px 6px; font-size: 11px; color: var(--title); border-color: var(--title); }
+.tfont-global #gFontScale { color: var(--title); font-variant-numeric: tabular-nums; min-width: 34px; text-align: center; }
 
 /* ---- caption transcript (below the timeline) ---- */
 #transcriptWrap {

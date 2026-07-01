@@ -6,6 +6,7 @@
 'use strict';
 
 const $ = (s) => document.querySelector(s);
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const fmtTC = (t) => {
   if (!isFinite(t) || t < 0) t = 0;
   const h = Math.floor(t / 3600);
@@ -35,8 +36,9 @@ const State = {
   outputs: {},         // 1-based index -> existing output filename on disk
   plans: [],           // rendered cut plans: [{in,out,segments:[{start,end,camera}]}]
   activeCam: null,     // camera id shown at the current playhead (per the plan)
-  titles: [],          // on-screen text overlays {text, subtitle, in, out, x, y}
+  titles: [],          // on-screen text overlays {text, subtitle, in, out, x, y, scale}
   selectedTitle: -1,
+  titleScale: 1,       // global title font multiplier (project-wide)
   titleOverlays: [],   // per-camera-pane preview overlays [{box,block,main,sub,video}]
   previewTitle: null,  // the title currently shown in the preview (for drag)
   snap: { x: false, y: false },   // center-lock guides active on each axis (while dragging)
@@ -96,8 +98,10 @@ async function boot() {
   $('#seedInput').value = State.seed;
   State.perfs = (m && m.performances) ? m.performances.slice() : [];
   State.titles = (m && m.titles) ? m.titles.slice() : [];
+  State.titleScale = (m && m.title_scale) || 1;
   renderPerfs();
   renderTitles();
+  updateGlobalFontUI();
 
   initTimeline();
   loadWaveform();
@@ -247,12 +251,15 @@ function updateTitleOverlay(t) {
     ov.box.style.left = fr.left + 'px'; ov.box.style.top = fr.top + 'px';
     ov.box.style.width = fr.fW + 'px'; ov.box.style.height = fr.fH + 'px';
     ov.box.style.opacity = op.toFixed(2);
-    ov.main.textContent = wrapText(active.text || '', TITLE_MAIN_MAX_CHARS);
+    // effective font scale = global * this title's own (both default 1) — mirror
+    // render.py: font grows and the wrap width shrinks inversely.
+    const es = (State.titleScale || 1) * (active.scale || 1);
+    ov.main.textContent = wrapText(active.text || '', Math.max(6, Math.round(TITLE_MAIN_MAX_CHARS / es)));
     ov.main.style.display = (active.text || '').trim() ? '' : 'none';
-    ov.sub.textContent = wrapText(active.subtitle || '', TITLE_SUB_MAX_CHARS);
+    ov.sub.textContent = wrapText(active.subtitle || '', Math.max(8, Math.round(TITLE_SUB_MAX_CHARS / es)));
     ov.sub.style.display = (active.subtitle || '').trim() ? '' : 'none';
-    ov.main.style.fontSize = (fr.fH / 16) + 'px';
-    ov.sub.style.fontSize = (fr.fH / 27) + 'px';
+    ov.main.style.fontSize = (fr.fH / 16 * es) + 'px';
+    ov.sub.style.fontSize = (fr.fH / 27 * es) + 'px';
     ov.block.style.left = (cx * 100) + '%';
     ov.block.style.top = (cy * 100) + '%';
     ov.box.classList.toggle('snap-x', State.snap.x);
@@ -402,6 +409,8 @@ function wireTransport() {
   $('#addBtn').onclick = addPending;
   $('#addTitleBtn').onclick = addTitle;
   $('#addTitleBtn2').onclick = addTitle;
+  $('#gFontDec').onclick = () => bumpGlobalFont(-0.1);
+  $('#gFontInc').onclick = () => bumpGlobalFont(+0.1);
   $('#saveBtn').onclick = save;
   $('#undoBtn').onclick = undo;
   $('#audioSource');
@@ -604,11 +613,25 @@ function renderTitles() {
         <input class="ttext tsub" type="text" placeholder="Subtitle (optional)" value="${escapeHtml(t.subtitle || '')}" />
         <span class="ttime">${fmtTC(t.in)} → ${fmtTC(t.out)} · ${fmtDur(t.out - t.in)}</span>
       </span>
+      <span class="tfont" title="Title font size (this card)">
+        <button class="small" data-act="fdec">A−</button>
+        <span class="tscale">${Math.round((t.scale || 1) * 100)}%</span>
+        <button class="small" data-act="finc">A+</button>
+      </span>
       <span class="rowbtns">
         <button class="small" data-act="center" title="Recenter (reset position)">⌖</button>
         <button class="small danger" data-act="del" title="Delete">✕</button>
       </span>`;
     const [txt, sub] = li.querySelectorAll('.ttext');
+    const scaleEl = li.querySelector('.tscale');
+    const bumpScale = (d) => {
+      pushUndo();
+      t.scale = Math.round(clamp((t.scale || 1) + d, 0.4, 3) * 100) / 100;
+      scaleEl.textContent = `${Math.round(t.scale * 100)}%`;
+      markDirty();
+    };
+    li.querySelector('[data-act=fdec]').onclick = (e) => { e.stopPropagation(); selectTitleQuiet(i); bumpScale(-0.1); };
+    li.querySelector('[data-act=finc]').onclick = (e) => { e.stopPropagation(); selectTitleQuiet(i); bumpScale(+0.1); };
     li.onclick = () => selectTitle(i);
     txt.onclick = sub.onclick = (e) => e.stopPropagation();
     txt.addEventListener('focus', () => selectTitleQuiet(i));
@@ -624,6 +647,19 @@ function renderTitles() {
     li.querySelector('[data-act=del]').onclick = (e) => { e.stopPropagation(); deleteTitle(i); };
     ol.appendChild(li);
   });
+}
+
+// Global title font scale (applies on top of each title's own scale).
+function updateGlobalFontUI() {
+  const el = $('#gFontScale');
+  if (el) el.textContent = `${Math.round((State.titleScale || 1) * 100)}%`;
+}
+
+function bumpGlobalFont(d) {
+  pushUndo();
+  State.titleScale = Math.round(clamp((State.titleScale || 1) + d, 0.4, 3) * 100) / 100;
+  updateGlobalFontUI();
+  markDirty();
 }
 
 /* ------------------------------------------------- zoomable canvas timeline */
@@ -1290,6 +1326,7 @@ function pushUndo() {
   State.undoStack.push({
     perfs: State.perfs.map(p => ({ ...p })),
     titles: State.titles.map(t => ({ ...t })),
+    titleScale: State.titleScale,
     seed: State.seed,
   });
   if (State.undoStack.length > 100) State.undoStack.shift();
@@ -1301,6 +1338,7 @@ function undo() {
   if (!snap) return;
   State.perfs = snap.perfs.map(p => ({ ...p }));
   State.titles = (snap.titles || []).map(t => ({ ...t }));
+  if (snap.titleScale != null) State.titleScale = snap.titleScale;
   State.seed = snap.seed;
   $('#seedInput').value = snap.seed;
   State.selected = -1;
@@ -1309,6 +1347,7 @@ function undo() {
   State.pendingIn = State.pendingOut = null;
   refreshPending();
   renderPerfs(); renderTitles(); renderBlocks();
+  updateGlobalFontUI();
   markDirty();                 // persist the reverted state
   updateUndoBtn();
 }
@@ -1348,12 +1387,14 @@ async function save({ auto = false } = {}) {
     fps: State.fps,
     duration: State.duration,
     audio_source: $('#audioSource').value,
+    title_scale: State.titleScale || 1,
     performances: State.perfs.map(p => ({
       title: p.title, composer: p.composer, in: p.in, out: p.out,
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,
       x: t.x == null ? null : t.x, y: t.y == null ? null : t.y,
+      scale: t.scale == null ? null : t.scale,
     })),
   };
   _saveInFlight = true;
@@ -1438,6 +1479,7 @@ function applyMarkers(m) {
   $('#seedInput').value = State.seed;
   State.perfs = (m && m.performances) ? m.performances.slice() : [];
   State.titles = (m && m.titles) ? m.titles.slice() : [];
+  State.titleScale = (m && m.title_scale) || 1;
   const sel = $('#audioSource');
   if (m && m.audio_source && sel && [...sel.options].some(o => o.value === m.audio_source)) {
     sel.value = m.audio_source;
@@ -1448,6 +1490,7 @@ function applyMarkers(m) {
   clearForm();
   refreshPending();
   renderPerfs(); renderTitles(); renderBlocks();
+  updateGlobalFontUI();
 }
 
 async function restoreBackup(id, label) {
@@ -1521,12 +1564,14 @@ window.addEventListener('beforeunload', (e) => {
     fps: State.fps,
     duration: State.duration,
     audio_source: $('#audioSource').value,
+    title_scale: State.titleScale || 1,
     performances: State.perfs.map(p => ({
       title: p.title, composer: p.composer, in: p.in, out: p.out,
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,
       x: t.x == null ? null : t.x, y: t.y == null ? null : t.y,
+      scale: t.scale == null ? null : t.scale,
     })),
   };
   navigator.sendBeacon('/api/markers', new Blob([JSON.stringify(payload)], { type: 'application/json' }));

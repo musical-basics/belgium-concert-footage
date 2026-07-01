@@ -20,6 +20,7 @@ Usage:
 import argparse
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -48,8 +49,47 @@ AUDIO_BED = os.path.join(ROOT, "Audio Edit Belgium Concert Highlights.wav")
 
 W, H, FPS = 1920, 1080, 60
 
-# Font used to burn in the on-screen titles (drawtext). Any .ttf on the box.
-TITLE_FONT = "/System/Library/Fonts/Supplemental/Arial.ttf"
+# Font used to burn in the on-screen titles (drawtext). Cross-platform: honour
+# $TITLE_FONT, else pick the first font that exists (macOS Arial, common Linux
+# DejaVu/Liberation). Install one on the render box if none are present.
+_FONT_CANDIDATES = [
+    os.environ.get("TITLE_FONT", ""),
+    "/System/Library/Fonts/Supplemental/Arial.ttf",          # macOS
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",       # Debian/Ubuntu
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",                   # Arch
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",                # Fedora
+]
+TITLE_FONT = next((p for p in _FONT_CANDIDATES if p and os.path.isfile(p)),
+                  "/System/Library/Fonts/Supplemental/Arial.ttf")
+
+
+# ---- encoder / hardware acceleration (platform-aware) ----------------
+_NVENC = None
+
+
+def has_nvenc():
+    """True if this ffmpeg build exposes the NVIDIA h264 encoder (cached)."""
+    global _NVENC
+    if _NVENC is None:
+        try:
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                                 capture_output=True, text=True).stdout
+            _NVENC = "h264_nvenc" in out
+        except Exception:
+            _NVENC = False
+    return _NVENC
+
+
+def resolve_encoder(name):
+    """Turn 'auto' (or None) into a concrete encoder for this machine: Apple
+    videotoolbox on macOS, NVENC if the GPU/ffmpeg supports it, else CPU x264."""
+    name = name or os.environ.get("RENDER_ENCODER", "auto")
+    if name and name != "auto":
+        return name
+    if platform.system() == "Darwin":
+        return "videotoolbox"
+    return "nvenc" if has_nvenc() else "x264"
 
 
 def src_path(cam):
@@ -70,8 +110,21 @@ def encoder_args(encoder):
         # deterministic, bit-exact across runs (single-threaded)
         return ["-c:v", "libx264", "-preset", "medium", "-crf", "18",
                 "-x264-params", "threads=1", "-pix_fmt", "yuv420p"]
-    # default: fast Apple hardware encoder
+    if encoder == "nvenc":
+        # NVIDIA hardware encoder (Linux GPU boxes)
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "10M", "-pix_fmt", "yuv420p"]
+    # Apple hardware encoder (macOS)
     return ["-c:v", "h264_videotoolbox", "-b:v", "10M", "-pix_fmt", "yuv420p"]
+
+
+def decode_hwaccel(encoder):
+    """Optional -hwaccel flags for the decode side of segment cuts. Skipped on
+    CPU/x264 so a machine with no GPU still works."""
+    if platform.system() == "Darwin":
+        return ["-hwaccel", "videotoolbox"]
+    if encoder == "nvenc":
+        return ["-hwaccel", "cuda"]
+    return []
 
 
 VF = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
@@ -128,19 +181,19 @@ def _wrap(text, max_chars):
     return lines
 
 
-def title_filter(perf_titles, t_in, t_out, work_dir):
+def title_filter(perf_titles, t_in, t_out, work_dir, gscale=1.0):
     """Build a drawtext filterchain for the titles overlapping this performance.
 
     Times in markers are global concert seconds; the rendered clip restarts at
     0, so each title's window is shifted by -t_in. Long text is word-wrapped and
     each line is drawn as its own drawtext (so every line is centred about the
     title's x). The whole block is centred on the title's normalized (x, y) —
-    defaulting to a centred lower-third. Text is written to sidecar files and
-    pulled in with textfile= so quotes/colons/commas need no escaping. Returns
-    '' when nothing overlaps.
+    defaulting to a centred lower-third. Font size = base * gscale (global) * the
+    title's own `scale`, with the wrap width scaled inversely so a line still
+    fills ~the same frame width. Text is written to sidecar files and pulled in
+    with textfile= so quotes/colons/commas need no escaping. '' when nothing
+    overlaps.
     """
-    fs_main, fs_sub = round(H / 16), round(H / 27)
-    lh_main, lh_sub = fs_main * 1.18, fs_sub * 1.25
     style = (f"fontfile='{TITLE_FONT}':fontcolor=white:borderw=3:"
              f"bordercolor=black@0.9:shadowcolor=black@0.55:shadowx=2:shadowy=2")
     parts = []
@@ -150,14 +203,18 @@ def title_filter(perf_titles, t_in, t_out, work_dir):
         if b - a <= 0.05:
             continue
         fd = min(0.4, max(0.05, (b - a) / 2))
+        # per-title font scale (x the global scale); default 1.0
+        s = gscale * (float(ttl["scale"]) if ttl.get("scale") else 1.0)
+        fs_main, fs_sub = round(H / 16 * s), round(H / 27 * s)
+        lh_main, lh_sub = fs_main * 1.18, fs_sub * 1.25
         cx = TITLE_DEF_X if ttl.get("x") is None else float(ttl["x"])
         cy = TITLE_DEF_Y if ttl.get("y") is None else float(ttl["y"])
         # each line horizontally centred about cx; block vertically centred on cy
         x_expr = f"(w*{cx:.4f}-text_w/2)"
         tail = f"x={x_expr}:enable='between(t,{a:.3f},{b:.3f})':{_fade_alpha(a, b, fd)}"
 
-        main_lines = _wrap((ttl.get("text") or "").strip(), TITLE_MAIN_MAX_CHARS)
-        sub_lines = _wrap((ttl.get("subtitle") or "").strip(), TITLE_SUB_MAX_CHARS)
+        main_lines = _wrap((ttl.get("text") or "").strip(), max(6, round(TITLE_MAIN_MAX_CHARS / s)))
+        sub_lines = _wrap((ttl.get("subtitle") or "").strip(), max(8, round(TITLE_SUB_MAX_CHARS / s)))
         gap = fs_main * 0.5 if (main_lines and sub_lines) else 0
         block_h = len(main_lines) * lh_main + gap + len(sub_lines) * lh_sub
         y0 = cy * H - block_h / 2        # centre the block vertically on cy
@@ -178,7 +235,7 @@ def title_filter(perf_titles, t_in, t_out, work_dir):
     return ",".join(parts)
 
 
-def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=()):
+def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), title_scale=1.0):
     t_in, t_out = float(perf["in"]), float(perf["out"])
     title = perf.get("title", "Untitled")
     name = f"{index+1:02d}_{slugify(title)}"
@@ -195,7 +252,7 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=()):
     perf_titles = [
         {"text": tt.get("text", ""), "subtitle": tt.get("subtitle", ""),
          "in": float(tt["in"]), "out": float(tt["out"]),
-         "x": tt.get("x"), "y": tt.get("y"),
+         "x": tt.get("x"), "y": tt.get("y"), "scale": tt.get("scale"),
          "local_in": round(max(0.0, float(tt["in"]) - t_in), 3),
          "local_out": round(min(t_out, float(tt["out"])) - t_in, 3)}
         for tt in titles
@@ -228,11 +285,12 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=()):
     os.makedirs(seg_dir, exist_ok=True)
     listfile = os.path.join(seg_dir, "concat.txt")
     enc = encoder_args(encoder)
+    hw = decode_hwaccel(encoder)
     with open(listfile, "w") as lf:
         for s in segments:
             out = os.path.join(seg_dir, f"seg_{s['index']:04d}.mp4")
             run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                 "-hwaccel", "videotoolbox",
+                 *hw,
                  "-ss", f"{s['start']:.3f}", "-i", src_path(s["camera"]),
                  "-t", f"{s['duration']:.3f}",
                  "-an", "-dn", "-vf", vf_for(s["camera"]), *enc,
@@ -254,7 +312,7 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=()):
          "-vn", "-c:a", "aac", "-b:a", "256k", "-ar", "48000", audio_only])
 
     out_path = os.path.join(OUT_DIR, name + ".mp4")
-    title_vf = title_filter(perf_titles, t_in, t_out, seg_dir) if perf_titles else ""
+    title_vf = title_filter(perf_titles, t_in, t_out, seg_dir, title_scale) if perf_titles else ""
     if title_vf:
         # Burn the titles in -> the video must be re-encoded (can't stream-copy).
         run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -275,9 +333,12 @@ def main():
     ap.add_argument("--markers", default=MARKERS)
     ap.add_argument("--only", default="", help="comma list of 1-based indices")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--encoder", choices=["videotoolbox", "x264"], default="videotoolbox")
+    ap.add_argument("--encoder", choices=["auto", "videotoolbox", "nvenc", "x264"],
+                    default="auto", help="auto = videotoolbox on macOS, nvenc if available, else x264")
     ap.add_argument("--audio", default=None, help="override audio source camera id")
     args = ap.parse_args()
+
+    encoder = resolve_encoder(args.encoder)
 
     if not os.path.isfile(args.markers):
         sys.exit(f"No markers file at {args.markers}. Mark performances in the editor first.")
@@ -288,18 +349,19 @@ def main():
     audio_cam = args.audio or data.get("audio_source", "back")
     perfs = data.get("performances", [])
     titles = data.get("titles", [])
+    title_scale = float(data.get("title_scale") or 1.0)
     if not perfs:
         sys.exit("No performances in markers.json.")
 
     only = {int(x) for x in args.only.split(",") if x.strip()} if args.only else None
-    print(f"seed={seed}  audio={audio_cam}  encoder={args.encoder}  "
+    print(f"seed={seed}  audio={audio_cam}  encoder={encoder}  "
           f"performances={len(perfs)}  titles={len(titles)}"
           + (f"  only={sorted(only)}" if only else ""))
 
     for i, perf in enumerate(perfs):
         if only and (i + 1) not in only:
             continue
-        render_performance(perf, i, seed, audio_cam, args.encoder, args.dry_run, titles)
+        render_performance(perf, i, seed, audio_cam, encoder, args.dry_run, titles, title_scale)
 
     print("\nDone." + ("  (dry run — no video encoded)" if args.dry_run else f"  Output in {OUT_DIR}/"))
 
