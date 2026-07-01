@@ -313,24 +313,38 @@ def _export_worker(index):
         with _EXPORT_RUN_LOCK:                 # one heavy render at a time
             info["status"] = "running"
             info["started"] = time.time()
+            info["phase"] = "preparing"        # analysis + cut plan, before encoding
+            info["progress"] = 0
+            # -u => unbuffered, so render.py's "cut seg X/Y" progress arrives live
+            # (each \r update as its own line) instead of one burst at the end.
             proc = subprocess.Popen(
-                [sys.executable, RENDER_SCRIPT, "--only", str(index)],
+                [sys.executable, "-u", RENDER_SCRIPT, "--only", str(index)],
                 cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
             last = ""
-            for line in proc.stdout:           # \r progress arrives as its own lines
+            for line in proc.stdout:
                 line = line.strip()
                 if not line:
                     continue
                 last = line
                 info["line"] = line
-                m = re.search(r"(\S+\.mp4)\s*$", line)
-                if m and "✓" in line:
-                    info["file"] = m.group(1)
+                m = re.search(r"cut seg (\d+)/(\d+)", line)
+                if m:                          # encoding segments = the bulk of a render
+                    cur, total = int(m.group(1)), int(m.group(2))
+                    info["progress"] = round(cur / total * 100) if total else 0
+                    info["phase"] = "finishing" if cur >= total else "cutting"
+                elif "✓" in line and ".mp4" in line:
+                    fm = re.search(r"(\S+\.mp4)\s*$", line)
+                    if fm:
+                        info["file"] = fm.group(1)
+                    info["progress"] = 100
             proc.wait()
             info["code"] = proc.returncode
-            info["status"] = "done" if proc.returncode == 0 else "error"
-            if proc.returncode != 0:
+            if proc.returncode == 0:
+                info["status"] = "done"
+                info["progress"], info["phase"] = 100, "done"
+            else:
+                info["status"] = "error"
                 info["error"] = last or f"render exited {proc.returncode}"
     except Exception as e:
         info["status"] = "error"
@@ -347,6 +361,7 @@ def start_export(index):
         if cur and cur["status"] in ("queued", "running"):
             return False
         _EXPORTS[index] = {"status": "queued", "requested": time.time(),
+                           "progress": 0, "phase": "queued",
                            "file": None, "error": None, "line": ""}
     threading.Thread(target=_export_worker, args=(index,), daemon=True).start()
     return True
@@ -404,6 +419,8 @@ def exports_status():
             out[idx] = {
                 "status": info["status"],
                 "elapsed": elapsed,
+                "progress": info.get("progress", 0),
+                "phase": info.get("phase", ""),
                 "file": os.path.basename(info["file"]) if info.get("file") else None,
                 "error": info.get("error"),
                 "line": info.get("line", ""),

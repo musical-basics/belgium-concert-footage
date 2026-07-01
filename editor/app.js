@@ -1060,7 +1060,8 @@ function renderPerfs() {
         <button class="small exp-btn" data-act="export" data-idx="${i+1}" title="Export just this performance to output/">⤓ Export</button>
         <button class="small openbtn" data-act="open" title="Open the exported file" hidden>▶</button>
         <button class="small danger" data-act="del" title="Delete">✕</button>
-      </span>`;
+      </span>
+      <span class="exp-bar" hidden><i></i></span>`;
     li.onclick = () => selectPerf(i);
     li.querySelector('[data-act=edit]').onclick = (e) => {
       e.stopPropagation(); selectPerf(i); $('#fTitle').focus();
@@ -1092,15 +1093,37 @@ let _expPrev = {};
 function applyExportState(li) {
   const exp = li.querySelector('[data-act=export]');
   const open = li.querySelector('[data-act=open]');
+  const bar = li.querySelector('.exp-bar');
+  const fill = bar && bar.querySelector('i');
   if (!exp) return;
   const idx = exp.dataset.idx;
   const job = State.exports[idx];
   exp.classList.remove('busy', 'err');
+  const setBar = (pct, indet) => {
+    if (!bar) return;
+    bar.hidden = false;
+    bar.classList.toggle('indet', !!indet);
+    if (!indet && fill) fill.style.width = `${pct}%`;
+  };
+  const hideBar = () => {
+    if (!bar) return;
+    bar.hidden = true; bar.classList.remove('indet');
+    if (fill) fill.style.width = '0%';
+  };
   const st = job && job.status;
-  if (st === 'queued')        { exp.textContent = '⏳ queued';            exp.disabled = true;  exp.classList.add('busy'); }
-  else if (st === 'running')  { exp.textContent = `⏳ ${job.elapsed || 0}s`; exp.disabled = true;  exp.classList.add('busy'); }
-  else if (st === 'error')    { exp.textContent = '⚠ Retry';             exp.disabled = false; exp.classList.add('err'); }
-  else                        { exp.textContent = '⤓ Export';            exp.disabled = false; }
+  if (st === 'queued') {
+    exp.textContent = '⏳ queued'; exp.disabled = true; exp.classList.add('busy'); setBar(0, true);
+  } else if (st === 'running') {
+    exp.disabled = true; exp.classList.add('busy');
+    const p = job.progress || 0;
+    if (job.phase === 'cutting')        { exp.textContent = `${p}%`;      setBar(p, false); }
+    else if (job.phase === 'finishing') { exp.textContent = 'finishing'; setBar(100, false); }
+    else                                { exp.textContent = '⏳ prep';    setBar(0, true); }  // preparing
+  } else if (st === 'error') {
+    exp.textContent = '⚠ Retry'; exp.disabled = false; exp.classList.add('err'); hideBar();
+  } else {
+    exp.textContent = '⤓ Export'; exp.disabled = false; hideBar();
+  }
   // Show ▶ whenever a render exists on disk — this session's job file, or one
   // already in output/ (from a batch render or a prior session).
   const file = (job && job.file) || State.outputs[idx];
@@ -1149,7 +1172,7 @@ async function pollExports() {
   }
   _expPrev = Object.fromEntries(Object.entries(State.exports).map(([k, v]) => [k, v.status]));
   if (Object.values(State.exports).some(j => j.status === 'queued' || j.status === 'running')) {
-    _expPollTimer = setTimeout(pollExports, 1500);
+    _expPollTimer = setTimeout(pollExports, 900);   // snappy while a render runs
   }
 }
 
