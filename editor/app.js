@@ -1008,7 +1008,9 @@ function wireTimelineInput() {
     const ti = titleHit(x, y);                      // title body -> move the whole title
     if (ti >= 0) {
       const tt = State.titles[ti];
-      drag = { kind: 'titlemove', i: ti, grab: xToTime(x), in0: tt.in, out0: tt.out };
+      // Alt/Option-drag duplicates: the clone is made on the first move (below),
+      // so a plain alt-click leaves the original untouched.
+      drag = { kind: 'titlemove', i: ti, grab: xToTime(x), in0: tt.in, out0: tt.out, dupPending: e.altKey };
       dragSnapped = false;
       selectTitle(ti, { seek: false });
       return;
@@ -1025,7 +1027,16 @@ function wireTimelineInput() {
   });
   window.addEventListener('mousemove', (e) => {
     if (drag) {
-      if (!dragSnapped) { pushUndo(); dragSnapped = true; }   // snapshot on first move
+      if (!dragSnapped) {
+        pushUndo(); dragSnapped = true;                       // snapshot on first move
+        if (drag.dupPending) {                                // Alt-drag: clone now
+          const clone = { ...State.titles[drag.i] };
+          State.titles.push(clone);                           // appended; sorted on mouseup
+          drag.i = State.titles.length - 1;
+          drag.in0 = clone.in; drag.out0 = clone.out;
+          drag.dupPending = false;
+        }
+      }
       if (drag.kind === 'titlemove') moveTitle(drag, xToTime(localX(e)));
       else applyHandleDrag(drag, xToTime(localX(e)));
       return;
@@ -1064,7 +1075,7 @@ function wireTimelineInput() {
     const x = e.clientX - r.left, y = e.clientY - r.top;
     t.wave.style.cursor =
       (handleHit(x, y) || titleHandleHit(x, y)) ? 'ew-resize'
-      : titleHit(x, y) >= 0 ? 'grab'
+      : titleHit(x, y) >= 0 ? (e.altKey ? 'copy' : 'grab')   // alt = duplicate
       : 'default';
   });
 
@@ -1541,7 +1552,11 @@ function wireKeys() {
         if (State.selectedTitle >= 0) { e.preventDefault(); deleteTitle(State.selectedTitle, { confirm: false }); }
         else if (State.selected >= 0) { e.preventDefault(); deleteSelected(); }
         break;
-      case 't': case 'T': addTitle(); break;
+      case 't': case 'T':
+        if (e.metaKey) break;          // leave ⌘T (new tab) to the browser
+        e.preventDefault();            // don't leak the "t" into the focused title box
+        addTitle();
+        break;
       case 'p': case 'P': previewSelected(); break;
       case '=': case '+': e.preventDefault(); zoomAround(playTime(), 0.6); break;
       case '-': case '_': e.preventDefault(); zoomAround(playTime(), 1 / 0.6); break;
