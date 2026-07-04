@@ -270,6 +270,29 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 }
 .backup-empty { color: var(--muted); padding: 18px; text-align: center; }
 
+/* --- per-performance thumbnails --- */
+#perfList li .rowbtns .thumb-btn { color: var(--accent2); border-color: var(--accent2); }
+#perfList li .rowbtns .thumb-btn:hover { background: rgba(96,165,250,0.12); }
+#thumbsModal .modal-card { width: min(920px, 94vw); }
+.thumbs-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px; overflow: auto; padding: 2px;
+}
+.thumbs-grid .thumb { margin: 0; }
+.thumbs-grid .thumb a { display: block; }
+.thumbs-grid .thumb img {
+  width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block;
+  background: #000; border: 1px solid var(--line); border-radius: 7px;
+}
+.thumbs-grid .thumb a:hover img { border-color: var(--accent2); }
+.thumbs-grid .thumb figcaption {
+  color: var(--muted); font-size: 11px; margin-top: 4px;
+  font-variant-numeric: tabular-nums; text-align: center;
+}
+.thumbs-grid:empty::after {
+  content: "…"; color: var(--muted); grid-column: 1 / -1; text-align: center; padding: 24px;
+}
+
 #help { padding: 6px 14px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); background: var(--panel); }
 #help b { color: var(--text); }
 .flash { animation: flash .5s; }

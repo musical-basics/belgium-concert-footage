@@ -37,6 +37,24 @@
   </div>
 </div>
 
+<div id="thumbsModal" class="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3 id="thumbsTitle">Thumbnails</h3>
+      <span id="thumbsStatus" class="trstatus">—</span>
+      <div class="spacer"></div>
+      <button id="thumbsClose" class="small">✕ Close</button>
+    </div>
+    <div class="modal-note">
+      10 full-res stills spread across the performance, from the various camera
+      angles (the roving 5D 2 wherever it has footage, otherwise the 3 stationary
+      cameras), graded to match the final render. Click any frame to open it full
+      size in a new tab; the files live in <code>output/thumbs/</code>.
+    </div>
+    <div id="thumbsGrid" class="thumbs-grid"></div>
+  </div>
+</div>
+
 <main>
   <section id="videos">
     <!-- video tracks injected here -->
@@ -63,7 +81,7 @@
       <button id="zoomOut" title="Zoom out (−)">−</button>
       <button id="zoomIn" title="Zoom in (+)">+</button>
       <span id="zoomLabel" class="zoomlabel">—</span>
-      <span class="tlhint">wheel = zoom · drag waveform = scrub · drag block edges = adjust in/out · drag title body = move · drag minimap = pan · click block = select</span>
+      <span class="tlhint">wheel = zoom · drag waveform = scrub · drag block edges = adjust in/out · drag title body = move · ⌥drag title = duplicate · drag minimap = pan · click block = select</span>
       <span id="waveStatus" class="wavestatus"></span>
     </div>
     <canvas id="wave"></canvas>
@@ -133,6 +151,7 @@
   <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>I</b> in · <b>O</b> out · <b>Enter</b> add · <b>T</b> title · <b>P</b> preview · <b>+ −</b> zoom · <b>0</b> fit
 </footer>
 
+<script src="auth.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

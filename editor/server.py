@@ -29,6 +29,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EDITOR_DIR = os.path.join(ROOT, "editor")
 PROXY_DIR = os.path.join(ROOT, "proxies")
 OUT_DIR = os.path.join(ROOT, "output")
+THUMBS_DIR = os.path.join(OUT_DIR, "thumbs")   # generated performance thumbnails
 RENDER_SCRIPT = os.path.join(ROOT, "render", "render.py")
 DB_PATH = os.path.join(ROOT, "markers.db")
 MARKERS_PATH = os.path.join(ROOT, "markers.json")  # JSON mirror for the render pipeline
@@ -66,6 +67,8 @@ CONTENT_TYPES = {
     ".json": "application/json; charset=utf-8",
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
 }
 
 
@@ -392,6 +395,150 @@ def start_export(index):
     return True
 
 
+# ---- performance thumbnails ------------------------------------------
+# "Generate thumbnail" pulls 10 full-res still frames spread across a
+# performance, cycling through the camera angles (the roving 5D 2 where it has
+# live coverage, otherwise the 3 stationary cameras) so you get a varied
+# contact-sheet to pick a poster frame from — no render required. Frames are
+# graded with the SAME per-camera eq as the final render (render.CAMERA_EQ) so
+# what you see matches the export. Written to output/thumbs/NN/.
+
+# render.py owns the source-file map, per-camera grade, and the 5D 2 live map;
+# import lazily so a broken render module can't stop the editor from booting.
+_RENDER_MOD = None
+
+
+def _render_mod():
+    global _RENDER_MOD
+    if _RENDER_MOD is None:
+        sys.path.insert(0, os.path.join(ROOT, "render"))
+        import render as _r
+        _RENDER_MOD = _r
+    return _RENDER_MOD
+
+
+# id -> label, mirroring CLIPS, for captioning thumbnails.
+_CAM_LABEL = {c["id"]: c["label"] for c in CLIPS}
+
+# thumbnail generation jobs, keyed by 1-based performance index (like _EXPORTS).
+_THUMBS = {}
+_THUMBS_LOCK = threading.Lock()
+_THUMBS_RUN_LOCK = threading.Lock()
+N_THUMBS = 10          # frames per performance
+
+
+def _thumb_shots(t_in, t_out, r):
+    """Pick N_THUMBS (concert_time, camera, source_time) shots across a
+    performance. 5D 2 wins wherever it has live coverage of the moment;
+    otherwise the 3 stationary cameras rotate so the sheet spans angles."""
+    live = r.load_live_clips()
+
+    def live_at(t):
+        for c in live:
+            if c["ref_in"] <= t < c["ref_out"]:
+                return c
+        return None
+
+    span = t_out - t_in
+    # Every non-live camera is a valid angle (including "back", which doubles as
+    # the audio source). Only the roving 5D 2 is handled via live coverage.
+    stationary = [c["id"] for c in CLIPS if not c.get("live", False)] or ["back"]
+    # Sample at the mid-point of N equal slices (avoids the exact in/out frames,
+    # which are often a cut or black).
+    shots = []
+    rot = 0
+    for k in range(N_THUMBS):
+        t = t_in + span * (k + 0.5) / N_THUMBS
+        cov = live_at(t)
+        if cov is not None:
+            cam, src = "5d2", t - cov["delta"]   # src = ref - delta
+        else:
+            cam = stationary[rot % len(stationary)]
+            rot += 1
+            src = t
+        shots.append((round(t, 3), cam, round(max(0.0, src), 3)))
+    return shots
+
+
+def _extract_thumb(r, cam, src_t, dst):
+    """One full-res JPEG frame at src_t from camera `cam`, graded like the
+    render. Fast seek (-ss before -i) + a single frame."""
+    eq = r.CAMERA_EQ.get(cam)
+    vf = f"{eq},scale=640:-2" if eq else "scale=640:-2"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-ss", f"{src_t:.3f}", "-i", r.src_path(cam),
+         "-frames:v", "1", "-vf", vf, "-q:v", "3", dst],
+        check=True)
+
+
+def _thumbs_worker(index, perf):
+    info = _THUMBS[index]
+    try:
+        with _THUMBS_RUN_LOCK:                  # serialize; ffmpeg is disk-heavy
+            info["status"] = "running"
+            r = _render_mod()
+            out_dir = os.path.join(THUMBS_DIR, f"{index:02d}")
+            os.makedirs(out_dir, exist_ok=True)
+            # Clear any stale frames from a previous run of this performance.
+            for old in os.listdir(out_dir):
+                if old.endswith(".jpg"):
+                    os.remove(os.path.join(out_dir, old))
+            shots = _thumb_shots(perf["in"], perf["out"], r)
+            thumbs = []
+            for k, (t, cam, src) in enumerate(shots):
+                name = f"{k:02d}.jpg"
+                try:
+                    _extract_thumb(r, cam, src, os.path.join(out_dir, name))
+                except subprocess.CalledProcessError:
+                    continue                    # skip a frame ffmpeg couldn't grab
+                thumbs.append({
+                    "url": f"/thumbs/{index:02d}/{name}",
+                    "t": t, "camera": cam,
+                    "camera_label": _CAM_LABEL.get(cam, cam),
+                })
+                info["done"] = len(thumbs)
+            info["thumbs"] = thumbs
+            info["status"] = "done" if thumbs else "error"
+            if not thumbs:
+                info["error"] = "no frames could be extracted"
+    except Exception as e:
+        info["status"] = "error"
+        info["error"] = str(e)
+
+
+def start_thumbs(index):
+    """Kick a background thumbnail job for a performance (1-based). Returns
+    (started, error): started=False if one is already queued/running."""
+    try:
+        with db_connect() as conn:
+            perfs = _load(conn)["performances"]
+    except Exception as e:
+        return False, str(e)
+    if not (1 <= index <= len(perfs)):
+        return False, "no such performance"
+    perf = perfs[index - 1]
+    with _THUMBS_LOCK:
+        cur = _THUMBS.get(index)
+        if cur and cur["status"] in ("queued", "running"):
+            return False, None
+        _THUMBS[index] = {"status": "queued", "done": 0, "total": N_THUMBS,
+                          "thumbs": [], "error": None}
+    threading.Thread(target=_thumbs_worker, args=(index, perf), daemon=True).start()
+    return True, None
+
+
+def thumbs_status(index):
+    """Snapshot of one performance's thumbnail job (or a bare 'idle')."""
+    with _THUMBS_LOCK:
+        info = _THUMBS.get(index)
+        if not info:
+            return {"status": "idle", "thumbs": []}
+        return {"status": info["status"], "done": info.get("done", 0),
+                "total": info.get("total", N_THUMBS),
+                "thumbs": info.get("thumbs", []), "error": info.get("error")}
+
+
 def output_file_map():
     """Map 1-based performance index -> existing output filename, so the editor
     can show an 'open' affordance for any performance already rendered on disk
@@ -565,6 +712,15 @@ class Handler(BaseHTTPRequestHandler):
         if presented is None:
             q = urllib.parse.urlparse(self.path).query
             presented = urllib.parse.parse_qs(q).get("token", [""])[0] or None
+        if presented is None:
+            # Cookie 'et' — lets the browser authorize <video>/<img>/media that
+            # can't carry an Authorization header. Set by editor/auth.js.
+            cookie = self.headers.get("Cookie", "")
+            for part in cookie.split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == "et" and v:
+                    presented = v
+                    break
         return presented is not None and hmac.compare_digest(presented, AUTH_TOKEN)
 
     def _require_auth(self):
@@ -637,6 +793,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         # Gate data + media; leave the static shell open so the login can load.
         if (path.startswith("/api/") or path.startswith("/proxies/")
+                or path.startswith("/thumbs/")
                 or path == "/waveform.u8") and not self._require_auth():
             return
         if path == "/" or path == "":
@@ -655,6 +812,13 @@ class Handler(BaseHTTPRequestHandler):
                                     "files": output_file_map()})
         if path == "/api/plans":
             return self._send_json({"plans": render_plans()})
+        if path == "/api/thumbnails":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                index = int(q.get("index", [""])[0])
+            except (ValueError, TypeError):
+                return self._send_json({"ok": False, "error": "index (int) required"}, 400)
+            return self._send_json(thumbs_status(index))
         if path == "/api/waveform":
             if os.path.isfile(WAVE_META) and os.path.isfile(WAVE_BIN):
                 with open(WAVE_META) as f:
@@ -676,6 +840,14 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/proxies/"):
             name = os.path.basename(path)
             return self._serve_file(os.path.join(PROXY_DIR, name))
+        if path.startswith("/thumbs/"):
+            # /thumbs/NN/KK.jpg — a generated performance thumbnail. Restrict to
+            # THUMBS_DIR (no path traversal) and only serve real image files.
+            rel = os.path.normpath(path[len("/thumbs/"):]).lstrip("/")
+            target = os.path.normpath(os.path.join(THUMBS_DIR, rel))
+            if not target.startswith(THUMBS_DIR + os.sep):
+                return self.send_error(404, "Not found")
+            return self._serve_file(target)
         if path.startswith("/editor/"):
             name = os.path.basename(path)
             return self._serve_file(os.path.join(EDITOR_DIR, name))
@@ -743,6 +915,17 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 400)
             started = start_export(index)
+            return self._send_json({"ok": True, "index": index, "started": started})
+        if path == "/api/thumbnails":
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                index = int(json.loads(raw.decode("utf-8")).get("index"))
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            started, err = start_thumbs(index)
+            if err:
+                return self._send_json({"ok": False, "error": err}, 400)
             return self._send_json({"ok": True, "index": index, "started": started})
         if path == "/api/open":
             # Open a finished render in the default player. Restricted to OUT_DIR.

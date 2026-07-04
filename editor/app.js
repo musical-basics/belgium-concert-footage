@@ -123,6 +123,7 @@ async function boot() {
   wireTransport();
   wireForm();
   wireBackups();
+  wireThumbs();
   wireKeys();
   pollExports();           // pick up any export already running
   loadPlans();             // rendered cut plans -> "which camera is shown" indicator
@@ -1195,6 +1196,7 @@ function renderPerfs() {
       <span class="dur">${fmtDur(p.out - p.in)}</span>
       <span class="rowbtns">
         <button class="small" data-act="edit" title="Edit in form">Edit</button>
+        <button class="small thumb-btn" data-act="thumbs" data-idx="${i+1}" title="Generate 10 thumbnail stills across the camera angles">🖼 Thumbs</button>
         <button class="small exp-btn" data-act="export" data-idx="${i+1}" title="Export just this performance to output/">⤓ Export</button>
         <button class="small openbtn" data-act="open" title="Open the exported file" hidden>▶</button>
         <button class="small danger" data-act="del" title="Delete">✕</button>
@@ -1203,6 +1205,9 @@ function renderPerfs() {
     li.onclick = () => selectPerf(i);
     li.querySelector('[data-act=edit]').onclick = (e) => {
       e.stopPropagation(); selectPerf(i); $('#fTitle').focus();
+    };
+    li.querySelector('[data-act=thumbs]').onclick = (e) => {
+      e.stopPropagation(); generateThumbs(i);
     };
     li.querySelector('[data-act=export]').onclick = (e) => {
       e.stopPropagation(); exportPerf(i);
@@ -1319,6 +1324,90 @@ function flashStatus(msg) {
   if (!s) return;
   s.textContent = msg;
   s.classList.add('flash'); setTimeout(() => s.classList.remove('flash'), 600);
+}
+
+/* ------------------------------------------------ per-performance thumbnails */
+// "🖼 Thumbs" grabs 10 full-res stills spread across a performance, cycling the
+// camera angles (5D 2 where it has live coverage, else the 3 stationary cams),
+// graded like the render. The server extracts them in the background; we open a
+// modal and poll /api/thumbnails?index=N until the sheet is complete.
+let _thumbPollTimer = null;
+let _thumbIndex = null;   // 1-based perf index the modal is currently showing
+
+async function generateThumbs(i) {
+  const index = i + 1;
+  _thumbIndex = index;
+  if (State.dirty) await save({ auto: true });   // server reads current markers
+  openThumbsModal(State.perfs[i], index);
+  setThumbsStatus('starting…');
+  try {
+    const res = await fetch('/api/thumbnails', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index }),
+    }).then(r => r.json());
+    if (!res.ok) throw new Error(res.error || 'could not start');
+  } catch (err) {
+    setThumbsStatus('⚠ ' + String(err));
+    return;
+  }
+  pollThumbs();
+}
+
+async function pollThumbs() {
+  _thumbPollTimer = null;
+  const index = _thumbIndex;
+  if (index == null) return;
+  let data;
+  try { data = await fetch(`/api/thumbnails?index=${index}`).then(r => r.json()); }
+  catch { data = { status: 'error', error: 'network', thumbs: [] }; }
+  if (_thumbIndex !== index) return;             // modal moved on / closed
+  renderThumbsGrid(data.thumbs || []);
+  if (data.status === 'running' || data.status === 'queued') {
+    setThumbsStatus(`generating… ${data.done || 0}/${data.total || 10}`);
+    _thumbPollTimer = setTimeout(pollThumbs, 700);
+  } else if (data.status === 'error') {
+    setThumbsStatus('⚠ ' + (data.error || 'failed'));
+  } else {
+    setThumbsStatus(`${(data.thumbs || []).length} thumbnails · click one to open full size`);
+  }
+}
+
+function openThumbsModal(perf, index) {
+  const modal = $('#thumbsModal');
+  $('#thumbsTitle').textContent = `Thumbnails — ${index}. ${perf.title || 'performance'}`;
+  renderThumbsGrid([]);
+  modal.hidden = false;
+}
+
+function setThumbsStatus(msg) { $('#thumbsStatus').textContent = msg; }
+
+function renderThumbsGrid(thumbs) {
+  const grid = $('#thumbsGrid');
+  grid.innerHTML = '';
+  thumbs.forEach((th) => {
+    const fig = document.createElement('figure');
+    fig.className = 'thumb';
+    fig.innerHTML = `
+      <a href="${th.url}" target="_blank" rel="noopener">
+        <img src="${th.url}" loading="lazy" alt="${escapeHtml(th.camera_label || '')} @ ${fmtTC(th.t)}" />
+      </a>
+      <figcaption>${escapeHtml(th.camera_label || th.camera)} · ${fmtTC(th.t)}</figcaption>`;
+    grid.appendChild(fig);
+  });
+}
+
+function wireThumbs() {
+  const modal = $('#thumbsModal');
+  const close = () => {
+    modal.hidden = true;
+    _thumbIndex = null;
+    if (_thumbPollTimer) { clearTimeout(_thumbPollTimer); _thumbPollTimer = null; }
+  };
+  $('#thumbsClose').onclick = close;
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !modal.hidden) close();
+  });
 }
 
 /* ----------------------------------------------------- caption transcript */
