@@ -38,7 +38,38 @@ SOURCES = {
     "back": "Main Footage/Back Camera.mov",
     "livestream": "Main Footage/Livestream Footage.mov",
     "piano": "Main Footage/camera next to piano.mov",
+    "5d2": "5D 2.mp4",   # roving live camera; timeline mapping via SYNC_JSON
 }
+
+# Audio-matched map of the 5D 2 selects reel onto the concert timeline
+# (produced by tools/audio_sync/, see its PLAYBOOK.md). When present, any
+# performance range covered by a usable 5D 2 clip is rendered from that
+# camera (the "live feed" wins); the 3 stationary cameras fill the gaps.
+SYNC_JSON = os.path.join(ROOT, "editor", "sync.json")
+
+# Trim this far inside each matched clip's edges so a cut can never spill a
+# frame of the neighbouring (different) shot at a 25fps clip boundary.
+LIVE_EDGE_PAD = 0.1
+
+
+def load_live_clips():
+    """Usable live-camera intervals on the concert timeline, or [] if the
+    sync map (or the source file) is missing. Black-video clips are excluded —
+    they carry concert audio but show nothing."""
+    if not os.path.isfile(SYNC_JSON) or not os.path.isfile(src_path("5d2")):
+        return []
+    with open(SYNC_JSON) as f:
+        doc = json.load(f)
+    out = []
+    for c in doc.get("clips", []):
+        if "black-video" in (c.get("flags") or []):
+            continue
+        a = c["ref_in"] + LIVE_EDGE_PAD
+        b = c["ref_out"] - LIVE_EDGE_PAD
+        if b - a > 1.0:
+            out.append({"ref_in": round(a, 3), "ref_out": round(b, 3),
+                        "delta": c["delta"]})
+    return out
 
 # Final audio bed muxed into every export: the mixed/mastered edit that fully
 # replaces the camera scratch audio. Same length & timeline as the clips, used
@@ -235,7 +266,8 @@ def title_filter(perf_titles, t_in, t_out, work_dir, gscale=1.0):
     return ",".join(parts)
 
 
-def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), title_scale=1.0):
+def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), title_scale=1.0,
+                       live_clips=()):
     t_in, t_out = float(perf["in"]), float(perf["out"])
     title = perf.get("title", "Untitled")
     name = f"{index+1:02d}_{slugify(title)}"
@@ -243,9 +275,11 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), ti
           f"[{t_in:.2f} -> {t_out:.2f}, {t_out-t_in:.1f}s] ===")
 
     transitions, _beats = detect_transitions(src_path(audio_cam), t_in, t_out)
-    segments, stats = build_segments(t_in, t_out, transitions, seed, index)
+    segments, stats = build_segments(t_in, t_out, transitions, seed, index,
+                                     live_clips=live_clips)
     print(f"  plan: {stats['segments']} segments  "
-          f"({stats['audio_cuts']} audio-snapped, {stats['heuristic_cuts']} heuristic cuts)")
+          f"({stats['audio_cuts']} audio-snapped, {stats['heuristic_cuts']} heuristic cuts, "
+          f"{stats['live_segments']} live/5D2 covering {stats['live_seconds']:.1f}s)")
 
     # Titles whose window overlaps this performance, with times shifted to the
     # clip's local (0-based) timeline for the overlay/plan.
@@ -273,8 +307,9 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), ti
 
     if dry:
         for s in segments:
+            src_note = f"  (5D2 src {s['start']-s['delta']:8.2f})" if "delta" in s else ""
             print(f"    {s['start']:8.2f} -> {s['end']:8.2f}  "
-                  f"{s['camera']:10s} [{s['cut_type']}]")
+                  f"{s['camera']:10s} [{s['cut_type']}]{src_note}")
         for tt in perf_titles:
             print(f"    title {tt['local_in']:8.2f} -> {tt['local_out']:8.2f}  "
                   f'"{tt["text"]}"' + (f" / {tt['subtitle']}" if tt["subtitle"] else ""))
@@ -289,9 +324,11 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), ti
     with open(listfile, "w") as lf:
         for s in segments:
             out = os.path.join(seg_dir, f"seg_{s['index']:04d}.mp4")
+            # the live camera lives on its own clock: src = concert_t - delta
+            seek = s["start"] - s["delta"] if "delta" in s else s["start"]
             run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                  *hw,
-                 "-ss", f"{s['start']:.3f}", "-i", src_path(s["camera"]),
+                 "-ss", f"{seek:.3f}", "-i", src_path(s["camera"]),
                  "-t", f"{s['duration']:.3f}",
                  "-an", "-dn", "-vf", vf_for(s["camera"]), *enc,
                  "-r", str(FPS), "-g", str(FPS), "-write_tmcd", "0",
@@ -353,15 +390,19 @@ def main():
     if not perfs:
         sys.exit("No performances in markers.json.")
 
+    live_clips = load_live_clips()
+
     only = {int(x) for x in args.only.split(",") if x.strip()} if args.only else None
     print(f"seed={seed}  audio={audio_cam}  encoder={encoder}  "
-          f"performances={len(perfs)}  titles={len(titles)}"
+          f"performances={len(perfs)}  titles={len(titles)}  "
+          f"live-cam clips={len(live_clips)}"
           + (f"  only={sorted(only)}" if only else ""))
 
     for i, perf in enumerate(perfs):
         if only and (i + 1) not in only:
             continue
-        render_performance(perf, i, seed, audio_cam, encoder, args.dry_run, titles, title_scale)
+        render_performance(perf, i, seed, audio_cam, encoder, args.dry_run, titles, title_scale,
+                           live_clips=live_clips)
 
     print("\nDone." + ("  (dry run — no video encoded)" if args.dry_run else f"  Output in {OUT_DIR}/"))
 

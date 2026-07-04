@@ -52,6 +52,11 @@ CLIPS = [
     {"id": "back",       "label": "Back Camera",         "proxy": "back.mp4",       "is_audio": True},
     {"id": "livestream", "label": "Livestream Footage",  "proxy": "livestream.mp4", "is_audio": False},
     {"id": "piano",      "label": "Camera next to piano","proxy": "piano.mp4",      "is_audio": False},
+    # Roving live camera. Only covers parts of the concert; the editor pane
+    # follows the playhead through the audio-matched map in editor/sync.json
+    # and the renderer prioritizes it wherever it has footage (render/plan.py).
+    {"id": "5d2",        "label": "5D 2 (live)",         "proxy": "5d2.mp4",        "is_audio": False,
+     "live": True},
 ]
 
 CONTENT_TYPES = {

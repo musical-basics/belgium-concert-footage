@@ -88,6 +88,14 @@ async function boot() {
   State.fps = meta.fps || 60;
   State.clips = meta.clips;
 
+  // Audio-matched map for the roving live camera (5D 2): concert time ->
+  // source time is t - delta inside each matched clip, no footage elsewhere.
+  try {
+    const sync = await fetch('/editor/sync.json').then(r => r.json());
+    State.liveClips = (sync.clips || []).map(c => (
+      { refIn: c.ref_in, refOut: c.ref_out, delta: c.delta }));
+  } catch { State.liveClips = []; }
+
   buildVideos();
   buildAudioSelect();
 
@@ -168,10 +176,20 @@ function updateStatus() {
 }
 
 /* --------------------------------------------------------------- videos */
+// Concert time -> live-camera source time, or null where the live camera
+// has no footage.
+function liveSrcAt(t) {
+  for (const c of (State.liveClips || [])) {
+    if (t >= c.refIn && t < c.refOut) return t - c.delta;
+  }
+  return null;
+}
+
 function buildVideos() {
   const wrap = $('#videos');
   wrap.innerHTML = '';
   State.videos = [];
+  State.liveVideo = null;
   State.clips.forEach((c, i) => {
     const track = document.createElement('div');
     track.className = 'track' + (c.is_audio ? ' audio-active' : '');
@@ -190,6 +208,15 @@ function buildVideos() {
       track.appendChild(ld);
     }
     track.appendChild(v);
+    if (c.live) {
+      const badge = document.createElement('div');
+      badge.className = 'nolive';
+      badge.textContent = 'NOT CAPTURED';
+      badge.hidden = true;
+      track.appendChild(badge);
+      State.liveVideo = v;
+      State.liveBadge = badge;
+    }
     wrap.appendChild(track);
     State.videos.push(v);
     if (c.is_audio) State.master = v;
@@ -318,6 +345,7 @@ function buildAudioSelect() {
   const sel = $('#audioSource');
   sel.innerHTML = '';
   State.clips.forEach((c) => {
+    if (c.live) return;   // partial coverage + own clock: can't drive audio/master
     const o = document.createElement('option');
     o.value = c.id; o.textContent = c.label;
     if (c.is_audio) o.selected = true;
@@ -337,7 +365,15 @@ function buildAudioSelect() {
 /* ----------------------------------------------------------- sync clock */
 function seekAll(t, force = false) {
   t = Math.max(0, Math.min(State.duration, t));
-  State.videos.forEach(v => { if (v.src) v.currentTime = t; });
+  State.videos.forEach(v => {
+    if (!v.src) return;
+    if (v === State.liveVideo) {
+      const st = liveSrcAt(t);
+      if (st != null) v.currentTime = st;
+      return;
+    }
+    v.currentTime = t;
+  });
 }
 
 function syncFollowers() {
@@ -345,21 +381,40 @@ function syncFollowers() {
   const t = State.master.currentTime;
   State.videos.forEach(v => {
     if (v === State.master || !v.src) return;
-    const drift = v.currentTime - t;
+    // the live camera runs on its own clock through the sync map; when the
+    // playhead leaves its coverage it just freezes (badge shows why)
+    const target = (v === State.liveVideo) ? liveSrcAt(t) : t;
+    if (target == null) { if (!v.paused) v.pause(); return; }
+    const drift = v.currentTime - target;
     if (Math.abs(drift) > 0.06) {
       // hard correct large drift
-      v.currentTime = t;
+      v.currentTime = target;
     } else if (State.playing) {
       // gentle rate nudge for small drift
       v.playbackRate = drift > 0.012 ? 0.96 : drift < -0.012 ? 1.04 : 1.0;
     }
+    if (State.playing && v.paused) v.play().catch(() => {});
   });
+}
+
+// Keep the live pane honest while paused/scrubbing too: badge + frame follow
+// the playhead through the sync map. Called every tick.
+function updateLivePane(t) {
+  if (!State.liveVideo || !State.liveVideo.src) return;
+  const st = liveSrcAt(t);
+  if (State.liveBadge) State.liveBadge.hidden = (st != null);
+  if (st == null && !State.liveVideo.paused) State.liveVideo.pause();
 }
 
 async function playAll() {
   State.playing = true;
   $('#playBtn').textContent = '❚❚ Pause';
-  await Promise.allSettled(State.videos.map(v => v.src ? v.play() : null));
+  const t = State.master ? State.master.currentTime : 0;
+  await Promise.allSettled(State.videos.map(v => {
+    if (!v.src) return null;
+    if (v === State.liveVideo && liveSrcAt(t) == null) return null;  // no coverage
+    return v.play();
+  }));
 }
 function pauseAll() {
   State.playing = false;
@@ -378,6 +433,7 @@ function tickLoop() {
   }
   drawTimeline(t);
   updateTitleOverlay(t);
+  updateLivePane(t);
   updateActiveCam(t);
   updateTranscriptHighlight(t);
   requestAnimationFrame(tickLoop);
