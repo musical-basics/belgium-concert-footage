@@ -124,6 +124,7 @@ async function boot() {
   wireForm();
   wireBackups();
   wireThumbs();
+  wireColor();
   wireKeys();
   pollExports();           // pick up any export already running
   loadPlans();             // rendered cut plans -> "which camera is shown" indicator
@@ -1463,6 +1464,167 @@ function wireThumbs() {
   $('#thumbsGrid').addEventListener('click', (e) => {
     const btn = e.target.closest('.reveal-btn');
     if (btn) { e.preventDefault(); revealThumb(btn.dataset.url); }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !modal.hidden) close();
+  });
+}
+
+/* ------------------------------------------------- per-camera color grade */
+// A Color modal (top-bar 🎨) with 4 sliders per camera (brightness/gamma/
+// contrast/saturation). Loads defaults + saved overrides from the server, edits
+// live in memory, and POSTs the diff-from-default on Save. Applies to both the
+// render and the thumbnails (server merges it onto render.py's defaults).
+const Color = { spec: null, values: {} };   // spec from API; values = working edit
+
+async function openColorModal() {
+  const modal = $('#colorModal');
+  modal.hidden = false;
+  setColorStatus('loading…');
+  try {
+    Color.spec = await fetch('/api/camera-grades').then(r => r.json());
+  } catch (e) {
+    setColorStatus('⚠ could not load'); return;
+  }
+  // Working values = saved override for a camera if present, else its default.
+  Color.values = {};
+  for (const cam of Color.spec.cameras) {
+    const d = Color.spec.defaults[cam.id] || {};
+    const g = (Color.spec.grades || {})[cam.id] || {};
+    Color.values[cam.id] = {};
+    for (const k of Color.spec.keys) Color.values[cam.id][k] = (k in g ? g[k] : d[k]);
+  }
+  renderColorCams();
+  setColorStatus('');
+}
+
+function setColorStatus(msg) { const s = $('#colorStatus'); if (s) s.textContent = msg; }
+
+// One knob's step/format — brightness is a small +/- offset, the rest are ~1x.
+const COLOR_STEP = { brightness: 0.01, gamma: 0.01, contrast: 0.01, saturation: 0.01 };
+const fmtGrade = (v) => (Math.round(v * 100) / 100).toFixed(2);
+
+function renderColorCams() {
+  const wrap = $('#colorCams');
+  wrap.innerHTML = '';
+  for (const cam of Color.spec.cameras) {
+    const box = document.createElement('div');
+    box.className = 'color-cam';
+    box.dataset.cam = cam.id;
+    const rows = Color.spec.keys.map((k) => {
+      const [lo, hi] = Color.spec.bounds[k];
+      const v = Color.values[cam.id][k];
+      return `
+        <label class="grade-row" data-key="${k}">
+          <span class="grade-name">${k}</span>
+          <input type="range" class="grade-slider" min="${lo}" max="${hi}"
+                 step="${COLOR_STEP[k] || 0.01}" value="${v}" />
+          <input type="number" class="grade-num" min="${lo}" max="${hi}"
+                 step="${COLOR_STEP[k] || 0.01}" value="${fmtGrade(v)}" />
+        </label>`;
+    }).join('');
+    box.innerHTML = `
+      <div class="color-cam-head">
+        <b>${escapeHtml(cam.label)}</b>
+        <span class="grade-mod" hidden>· modified</span>
+        <div class="spacer"></div>
+        <button class="small grade-reset" data-cam="${cam.id}">Reset</button>
+      </div>
+      ${rows}`;
+    wrap.appendChild(box);
+    updateCamModified(cam.id);
+  }
+}
+
+// Mark a camera "modified" when its working values differ from its default.
+function updateCamModified(camId) {
+  const d = Color.spec.defaults[camId] || {};
+  const v = Color.values[camId] || {};
+  const changed = Color.spec.keys.some((k) => Math.abs((v[k] ?? 0) - (d[k] ?? 0)) > 1e-6);
+  const box = $(`.color-cam[data-cam="${camId}"]`);
+  if (box) box.querySelector('.grade-mod').hidden = !changed;
+}
+
+function setGrade(camId, key, raw) {
+  const [lo, hi] = Color.spec.bounds[key];
+  let v = parseFloat(raw);
+  if (isNaN(v)) return;
+  v = Math.max(lo, Math.min(hi, v));
+  Color.values[camId][key] = v;
+  // Sync both inputs in that row without a full re-render.
+  const row = $(`.color-cam[data-cam="${camId}"] .grade-row[data-key="${key}"]`);
+  if (row) {
+    row.querySelector('.grade-slider').value = v;
+    row.querySelector('.grade-num').value = fmtGrade(v);
+  }
+  updateCamModified(camId);
+}
+
+function resetCam(camId) {
+  const d = Color.spec.defaults[camId] || {};
+  for (const k of Color.spec.keys) Color.values[camId][k] = d[k];
+  // Re-render just this camera's rows.
+  const box = $(`.color-cam[data-cam="${camId}"]`);
+  if (!box) return;
+  Color.spec.keys.forEach((k) => {
+    const row = box.querySelector(`.grade-row[data-key="${k}"]`);
+    row.querySelector('.grade-slider').value = Color.values[camId][k];
+    row.querySelector('.grade-num').value = fmtGrade(Color.values[camId][k]);
+  });
+  updateCamModified(camId);
+}
+
+// Build the save payload: only cameras whose values differ from default (so the
+// server stores a minimal override and neutral cameras stay on defaults).
+function colorPayload() {
+  const grades = {};
+  for (const cam of Color.spec.cameras) {
+    const d = Color.spec.defaults[cam.id] || {};
+    const v = Color.values[cam.id];
+    if (Color.spec.keys.some((k) => Math.abs((v[k] ?? 0) - (d[k] ?? 0)) > 1e-6)) {
+      grades[cam.id] = { ...v };
+    }
+  }
+  return grades;
+}
+
+async function saveColor() {
+  setColorStatus('saving…');
+  try {
+    const res = await fetch('/api/camera-grades', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grades: colorPayload() }),
+    }).then(r => r.json());
+    if (!res.ok) throw new Error(res.error || 'save failed');
+    Color.spec.grades = res.grades || {};
+    setColorStatus('✓ saved · regenerate thumbnails to preview');
+    flashStatus('✓ camera color saved');
+  } catch (e) {
+    setColorStatus('⚠ ' + String(e));
+  }
+}
+
+function wireColor() {
+  const modal = $('#colorModal');
+  const close = () => { modal.hidden = true; };
+  $('#colorBtn').onclick = openColorModal;
+  $('#colorClose').onclick = close;
+  $('#colorSave').onclick = saveColor;
+  $('#colorResetAll').onclick = () => {
+    if (Color.spec) Color.spec.cameras.forEach((c) => resetCam(c.id));
+  };
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  // Delegated slider / number / reset handling (rows are rebuilt on open).
+  $('#colorCams').addEventListener('input', (e) => {
+    const el = e.target;
+    if (!el.classList.contains('grade-slider') && !el.classList.contains('grade-num')) return;
+    const camId = el.closest('.color-cam').dataset.cam;
+    const key = el.closest('.grade-row').dataset.key;
+    setGrade(camId, key, el.value);
+  });
+  $('#colorCams').addEventListener('click', (e) => {
+    const btn = e.target.closest('.grade-reset');
+    if (btn) resetCam(btn.dataset.cam);
   });
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !modal.hidden) close();

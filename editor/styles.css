@@ -298,6 +298,28 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
   content: "…"; color: var(--muted); grid-column: 1 / -1; text-align: center; padding: 24px;
 }
 
+/* --- per-camera color grade modal --- */
+#colorModal .modal-card { width: min(640px, 94vw); }
+.color-cams { overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.color-cam {
+  border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; background: var(--panel2);
+}
+.color-cam-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.color-cam-head b { font-size: 13px; }
+.color-cam-head .grade-mod { color: var(--warn); font-size: 11px; }
+.grade-row {
+  display: grid; grid-template-columns: 84px 1fr 62px; align-items: center;
+  gap: 10px; padding: 2px 0;
+}
+.grade-row .grade-name { color: var(--muted); font-size: 12px; text-transform: capitalize; }
+.grade-row .grade-slider { width: 100%; accent-color: var(--accent2); }
+.grade-row .grade-num {
+  width: 100%; text-align: right; font-variant-numeric: tabular-nums;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+  color: var(--text); padding: 3px 6px; font-size: 12px;
+}
+.modal-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+
 #help { padding: 6px 14px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); background: var(--panel); }
 #help b { color: var(--text); }
 .flash { animation: flash .5s; }

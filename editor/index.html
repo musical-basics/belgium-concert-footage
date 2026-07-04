@@ -16,6 +16,7 @@
   </label>
   <button id="undoBtn" title="Undo (⌘Z)" disabled>↶ Undo</button>
   <button id="backupsBtn" title="Browse &amp; restore automatic backups">⏱ Backups</button>
+  <button id="colorBtn" title="Per-camera color / brightness grade">🎨 Color</button>
   <button id="saveBtn" class="primary">Save markers</button>
 </header>
 
@@ -54,6 +55,30 @@
       open it full size; the files live in <code>output/thumbs/</code>.
     </div>
     <div id="thumbsGrid" class="thumbs-grid"></div>
+  </div>
+</div>
+
+<div id="colorModal" class="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Camera color &amp; brightness</h3>
+      <span id="colorStatus" class="trstatus">—</span>
+      <div class="spacer"></div>
+      <button id="colorClose" class="small">✕ Close</button>
+    </div>
+    <div class="modal-note">
+      Per-camera color grade applied to the final render <b>and</b> the
+      thumbnails. <b>Brightness</b> is exposure (0 = none), <b>Gamma</b> lifts
+      midtones (1 = none), plus <b>Contrast</b> and <b>Saturation</b> (1 = none).
+      Changes apply on <b>Save</b>; regenerate a performance's thumbnails to
+      preview. Each camera has its own <b>Reset</b> back to the built-in default.
+    </div>
+    <div id="colorCams" class="color-cams"></div>
+    <div class="modal-foot">
+      <button id="colorResetAll" class="small">↺ Reset all to defaults</button>
+      <div class="spacer"></div>
+      <button id="colorSave" class="primary small">Save color</button>
+    </div>
   </div>
 </div>
 

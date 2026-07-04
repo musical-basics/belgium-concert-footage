@@ -161,19 +161,72 @@ def decode_hwaccel(encoder):
 VF = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,fps={FPS},format=yuv420p,setpts=PTS-STARTPTS")
 
-# Per-camera color correction, prepended to the common VF. The Back Camera is
-# underexposed vs the other two, so lift its midtones with gamma (preserves the
-# deep blacks / saturated stage lights better than a flat brightness offset).
-# 5D 2 also reads dark, so give it a gentler gamma lift. Tune the numbers here
-# if it needs more/less.
-CAMERA_EQ = {
-    "back": "eq=contrast=1.18:gamma=1.62:saturation=1.05",
-    "5d2":  "eq=brightness=0.06:gamma=1.75:saturation=1.03",
+# Per-camera color correction (ffmpeg `eq`), prepended to the common VF.
+# Each camera's grade is 4 knobs: brightness (exposure offset, neutral 0),
+# gamma (midtone lift, neutral 1), contrast (neutral 1), saturation (neutral 1).
+# These DEFAULTS are the baked-in look; the editor can override them per project
+# (persisted in markers.json under "camera_grades") — see grades_from_markers().
+# The Back Camera is underexposed, so lift midtones with gamma (preserves deep
+# blacks / saturated stage lights better than a flat brightness offset); the 5D 2
+# reads dark too and gets a gamma lift plus a small exposure bump.
+EQ_NEUTRAL = {"brightness": 0.0, "gamma": 1.0, "contrast": 1.0, "saturation": 1.0}
+CAMERA_GRADE_DEFAULTS = {
+    "back":       {"brightness": 0.0,  "gamma": 1.62, "contrast": 1.18, "saturation": 1.05},
+    "livestream": dict(EQ_NEUTRAL),
+    "piano":      dict(EQ_NEUTRAL),
+    "5d2":        {"brightness": 0.06, "gamma": 1.75, "contrast": 1.0,  "saturation": 1.03},
 }
+
+# Active grades, keyed by camera id. Overridden at runtime by the markers.json
+# "camera_grades" block when present (apply_camera_grades); defaults otherwise.
+CAMERA_GRADES = {cam: dict(g) for cam, g in CAMERA_GRADE_DEFAULTS.items()}
+
+
+def eq_filter(grade):
+    """ffmpeg `eq=...` string for one camera grade, or "" if the grade is neutral
+    (no filter needed). Only non-neutral knobs are emitted, so the filter stays
+    minimal and identical to hand-written strings."""
+    if not grade:
+        return ""
+    parts = []
+    for key in ("brightness", "gamma", "contrast", "saturation"):
+        v = grade.get(key, EQ_NEUTRAL[key])
+        if abs(float(v) - EQ_NEUTRAL[key]) > 1e-6:
+            parts.append(f"{key}={float(v):g}")
+    return f"eq={':'.join(parts)}" if parts else ""
+
+
+def apply_camera_grades(overrides):
+    """Merge editor overrides (from markers.json) onto the defaults, in place, so
+    every code path (render + thumbnails) uses the same active grades. Unknown
+    cameras/keys are ignored; missing knobs fall back to the default for that
+    camera."""
+    for cam, base in CAMERA_GRADE_DEFAULTS.items():
+        g = dict(base)
+        o = (overrides or {}).get(cam) or {}
+        for key in EQ_NEUTRAL:
+            if key in o and o[key] is not None:
+                try:
+                    g[key] = float(o[key])
+                except (TypeError, ValueError):
+                    pass
+        CAMERA_GRADES[cam] = g
+
+
+def grades_from_markers(markers_path=None):
+    """Load the "camera_grades" override block from markers.json (if any) and
+    apply it. Safe to call at startup; no-op if the file/key is absent."""
+    path = markers_path or MARKERS
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+        apply_camera_grades(doc.get("camera_grades"))
+    except Exception:
+        apply_camera_grades(None)
 
 
 def vf_for(cam):
-    eq = CAMERA_EQ.get(cam)
+    eq = eq_filter(CAMERA_GRADES.get(cam))
     return f"{eq},{VF}" if eq else VF
 
 
@@ -389,6 +442,7 @@ def main():
     perfs = data.get("performances", [])
     titles = data.get("titles", [])
     title_scale = float(data.get("title_scale") or 1.0)
+    apply_camera_grades(data.get("camera_grades"))   # editor per-camera color
     if not perfs:
         sys.exit("No performances in markers.json.")
 

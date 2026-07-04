@@ -109,7 +109,10 @@ _SCHEMA = """
         fps          REAL,
         duration     REAL,
         audio_source TEXT,
-        title_scale  REAL DEFAULT 1.0
+        title_scale  REAL DEFAULT 1.0,
+        -- Per-camera color grade as a JSON object {cam: {brightness,gamma,
+        -- contrast,saturation}}. NULL = use render.py's baked-in defaults.
+        camera_grades TEXT
     );
     CREATE TABLE IF NOT EXISTS performances (
         id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,10 +172,12 @@ def db_connect():
     for col in ("x_pos", "y_pos", "scale"):
         if col not in cols:
             conn.execute(f"ALTER TABLE titles ADD COLUMN {col} REAL")
-    # ...and the project's global title font scale.
+    # ...and the project's global title font scale + per-camera color grades.
     pcols = {r["name"] for r in conn.execute("PRAGMA table_info(project)")}
     if "title_scale" not in pcols:
         conn.execute("ALTER TABLE project ADD COLUMN title_scale REAL")
+    if "camera_grades" not in pcols:
+        conn.execute("ALTER TABLE project ADD COLUMN camera_grades TEXT")
     return conn
 
 
@@ -188,6 +193,8 @@ def db_init():
                     with open(MARKERS_PATH) as f:
                         existing = json.load(f)
                     seed.update({k: existing[k] for k in DEFAULT_PROJECT if k in existing})
+                    if existing.get("camera_grades"):
+                        seed["camera_grades"] = existing["camera_grades"]
                     _write_performances(conn, existing.get("performances", []))
                     _write_titles(conn, existing.get("titles", []))
                     print(f"Seeded markers.db from {MARKERS_PATH} "
@@ -195,11 +202,13 @@ def db_init():
                           f"{len(existing.get('titles', []))} titles)")
                 except Exception as e:
                     print(f"Could not seed from markers.json: {e}")
+            cg = seed.get("camera_grades")
             conn.execute(
-                "INSERT INTO project (id, seed, project, fps, duration, audio_source) "
-                "VALUES (1, ?, ?, ?, ?, ?)",
+                "INSERT INTO project "
+                "(id, seed, project, fps, duration, audio_source, camera_grades) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?)",
                 (seed["seed"], seed["project"], seed["fps"], seed["duration"],
-                 seed["audio_source"]),
+                 seed["audio_source"], json.dumps(cg) if cg else None),
             )
 
 
@@ -227,12 +236,20 @@ def _write_titles(conn, titles):
 def _load(conn):
     """Read the full project payload (meta + performances + titles)."""
     prow = conn.execute(
-        "SELECT seed, project, fps, duration, audio_source, title_scale "
+        "SELECT seed, project, fps, duration, audio_source, title_scale, camera_grades "
         "FROM project WHERE id = 1"
     ).fetchone()
     meta = dict(prow) if prow else dict(DEFAULT_PROJECT)
     if meta.get("title_scale") is None:      # NULL on rows predating the column
         meta["title_scale"] = 1.0
+    # camera_grades is stored as a JSON string; expose it as an object (or drop
+    # the key when unset so the render/thumbnails fall back to defaults).
+    cg = meta.pop("camera_grades", None)
+    if cg:
+        try:
+            meta["camera_grades"] = json.loads(cg) if isinstance(cg, str) else cg
+        except (TypeError, ValueError):
+            pass
     meta["performances"] = [
         {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"]}
         for r in conn.execute(
@@ -401,8 +418,9 @@ def start_export(index):
 # performance, cycling through the camera angles (the roving 5D 2 where it has
 # live coverage, otherwise the 3 stationary cameras) so you get a varied
 # contact-sheet to pick a poster frame from — no render required. Frames are
-# graded with the SAME per-camera eq as the final render (render.CAMERA_EQ) so
-# what you see matches the export. Written to output/thumbs/NN/.
+# graded with the SAME per-camera eq as the final render (render.CAMERA_GRADES,
+# incl. any editor override) so what you see matches the export. Written to
+# output/thumbs/NN/.
 
 # render.py owns the source-file map, per-camera grade, and the 5D 2 live map;
 # import lazily so a broken render module can't stop the editor from booting.
@@ -420,6 +438,57 @@ def _render_mod():
 
 # id -> label, mirroring CLIPS, for captioning thumbnails.
 _CAM_LABEL = {c["id"]: c["label"] for c in CLIPS}
+
+# ---- per-camera color grades -----------------------------------------
+_GRADE_KEYS = ("brightness", "gamma", "contrast", "saturation")
+# Sane UI/validation ranges (also enforced server-side so a bad POST can't
+# produce a broken ffmpeg filter). ffmpeg eq: brightness -1..1, others 0..3ish.
+_GRADE_BOUNDS = {
+    "brightness": (-1.0, 1.0),
+    "gamma": (0.1, 3.0),
+    "contrast": (0.0, 3.0),
+    "saturation": (0.0, 3.0),
+}
+
+
+def _camera_grades():
+    """Current per-camera grade overrides from the DB (or {} if none saved)."""
+    try:
+        return db_load().get("camera_grades") or {}
+    except Exception:
+        return {}
+
+
+def camera_grade_defaults():
+    """The baked-in defaults from render.py, as a plain dict (for the API so the
+    editor can show/reset to them)."""
+    r = _render_mod()
+    return {cam: dict(g) for cam, g in r.CAMERA_GRADE_DEFAULTS.items()}
+
+
+def clean_camera_grades(incoming):
+    """Validate + clamp a {cam: {knob: value}} payload against known cameras and
+    bounds. Drops unknown cameras/knobs and non-numeric values. Returns a clean
+    dict (possibly empty)."""
+    r = _render_mod()
+    known = set(r.CAMERA_GRADE_DEFAULTS)
+    out = {}
+    for cam, g in (incoming or {}).items():
+        if cam not in known or not isinstance(g, dict):
+            continue
+        clean = {}
+        for key in _GRADE_KEYS:
+            if key not in g or g[key] is None:
+                continue
+            try:
+                v = float(g[key])
+            except (TypeError, ValueError):
+                continue
+            lo, hi = _GRADE_BOUNDS[key]
+            clean[key] = max(lo, min(hi, v))
+        if clean:
+            out[cam] = clean
+    return out
 
 # thumbnail generation jobs, keyed by 1-based performance index (like _EXPORTS).
 _THUMBS = {}
@@ -466,7 +535,7 @@ def _extract_thumb(r, cam, src_t, dst):
     resolution (render.W x render.H, 1080p) and graded + letterboxed exactly
     like the export so a thumbnail matches the final frame. Fast seek (-ss
     before -i) + a single frame."""
-    eq = r.CAMERA_EQ.get(cam)
+    eq = r.eq_filter(r.CAMERA_GRADES.get(cam))
     # Same scale/pad framing render.py uses (W/H, keep aspect, centre-pad), with
     # the per-camera grade prepended. Drop the video-only fps/setpts bits.
     scale_pad = (f"scale={r.W}:{r.H}:force_original_aspect_ratio=decrease,"
@@ -485,6 +554,7 @@ def _thumbs_worker(index, perf):
         with _THUMBS_RUN_LOCK:                  # serialize; ffmpeg is disk-heavy
             info["status"] = "running"
             r = _render_mod()
+            r.apply_camera_grades(_camera_grades())   # honor the saved grade
             out_dir = os.path.join(THUMBS_DIR, f"{index:02d}")
             os.makedirs(out_dir, exist_ok=True)
             # Clear any stale frames from a previous run of this performance.
@@ -650,16 +720,19 @@ def exports_status():
 def _persist(conn, data):
     """Write a full project payload into an open connection (project + regions),
     plus the periodic backup. Caller holds _DB_LOCK and the transaction."""
+    cg = data.get("camera_grades")
     conn.execute(
-        "INSERT INTO project (id, seed, project, fps, duration, audio_source, title_scale) "
-        "VALUES (1, ?, ?, ?, ?, ?, ?) "
+        "INSERT INTO project "
+        "(id, seed, project, fps, duration, audio_source, title_scale, camera_grades) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(id) DO UPDATE SET "
         "seed=excluded.seed, project=excluded.project, fps=excluded.fps, "
         "duration=excluded.duration, audio_source=excluded.audio_source, "
-        "title_scale=excluded.title_scale",
+        "title_scale=excluded.title_scale, camera_grades=excluded.camera_grades",
         (data.get("seed", 42), data.get("project"), data.get("fps"),
          data.get("duration"), data.get("audio_source"),
-         data.get("title_scale", 1.0)),
+         data.get("title_scale", 1.0),
+         json.dumps(cg) if cg else None),
     )
     _write_performances(conn, data.get("performances", []))
     _write_titles(conn, data.get("titles", []))
@@ -859,6 +932,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"titles": db_load().get("titles", [])})
         if path == "/api/backups":
             return self._send_json({"backups": list_backups()})
+        if path == "/api/camera-grades":
+            # Per-camera color grade: the render defaults, plus any saved
+            # override, plus the labels — everything the Color modal needs.
+            return self._send_json({
+                "cameras": [{"id": c["id"], "label": c["label"]} for c in CLIPS],
+                "keys": list(_GRADE_KEYS),
+                "bounds": _GRADE_BOUNDS,
+                "defaults": camera_grade_defaults(),
+                "grades": _camera_grades(),
+            })
         if path == "/api/exports":
             return self._send_json({"exports": exports_status(),
                                     "files": output_file_map()})
@@ -959,6 +1042,24 @@ class Handler(BaseHTTPRequestHandler):
             if restored is None:
                 return self._send_json({"ok": False, "error": "no such backup"}, 404)
             return self._send_json({"ok": True, "restored": restored})
+        if path == "/api/camera-grades":
+            # Save the per-camera color grade (project-wide). Body: {"grades":
+            # {cam:{knob:val}}} — validated/clamped, then persisted + mirrored to
+            # markers.json so the render and thumbnails pick it up.
+            try:
+                body = self._read_json()
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            grades = clean_camera_grades(body.get("grades") if isinstance(body, dict) else None)
+            box = {}
+            def _set(data):
+                if grades:
+                    data["camera_grades"] = grades
+                else:
+                    data.pop("camera_grades", None)   # empty => back to defaults
+                box["grades"] = grades
+            db_mutate(_set)
+            return self._send_json({"ok": True, "grades": box["grades"]})
         if path == "/api/export":
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b"{}"
