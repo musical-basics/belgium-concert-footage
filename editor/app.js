@@ -126,6 +126,7 @@ async function boot() {
   wireBackups();
   wireThumbs();
   wireColor();
+  wireLive();
   wireKeys();
   pollExports();           // pick up any export already running
   loadPlans();             // rendered cut plans -> "which camera is shown" indicator
@@ -698,6 +699,41 @@ function selectTitle(idx, opts = {}) {
   if (seek && t) { focusRange(t.in, t.out); seekAll(t.in); }
 }
 
+/* --------------------------------------------------- 5D 2 clip selection */
+// Selecting a 5D 2 live clip opens the live toolbar (cut / full-extent /
+// remove) and highlights the clip on the timeline. Trim = drag its edges.
+function selectLive(idx) {
+  State.selectedLive = idx;
+  State.selected = -1; State.selectedTitle = -1;    // one selection lane at a time
+  updateLiveInfo();
+  markFullDirty();
+}
+
+function deselectLive() {
+  State.selectedLive = -1;
+  updateLiveInfo();
+  markFullDirty();
+}
+
+// Refresh the live toolbar: show it iff a clip is selected, with its number,
+// trimmed duration, and how much footage is trimmed off vs. the matched extent.
+function updateLiveInfo() {
+  const bar = $('#livebar');
+  if (!bar) return;
+  const c = State.selectedLive >= 0 ? State.liveClips[State.selectedLive] : null;
+  if (!c) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const dur = c.refOut - c.refIn;
+  const full = c.orig.refOut - c.orig.refIn;
+  const trimmed = full - dur;
+  const atFull = trimmed < 0.05;
+  $('#liveInfo').textContent =
+    `#${c.i}  ${fmtTC(c.refIn)} → ${fmtTC(c.refOut)}  ·  ${fmtDur(dur)}`
+    + (atFull ? '  (full extent)' : `  (${fmtDur(trimmed)} trimmed of ${fmtDur(full)})`)
+    + (c.black ? '  ⚫ black' : '');
+  const ext = $('#liveExtend'); if (ext) ext.disabled = atFull;
+}
+
 // Set selection from a focus event without rebuilding the list (keeps the
 // text input the user just clicked into focused).
 function selectTitleQuiet(idx) {
@@ -943,19 +979,35 @@ function rebuildStatic() {
   // (same steel-blue blocks as sync.html; gaps = the 5D 2 wasn't rolling)
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
   ctx.fillRect(0, LIVE_Y0, t.w, LIVE_LANE_H);
-  (State.liveClips || []).forEach((c) => {
+  (State.liveClips || []).forEach((c, i) => {
     const x0 = timeToX(c.refIn), x1 = timeToX(c.refOut);
     if (x1 < 0 || x0 > t.w) return;
-    ctx.fillStyle = c.black ? 'rgba(29,47,69,0.85)' : 'rgba(47,93,138,0.9)';
-    ctx.fillRect(x0, LIVE_Y0 + 1, Math.max(x1 - x0, 1.5), LIVE_LANE_H - 2);
-    ctx.strokeStyle = c.black ? '#4a6076' : '#7fb2e6';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x0 + 0.5, LIVE_Y0 + 1.5, Math.max(x1 - x0, 1.5) - 1, LIVE_LANE_H - 3);
+    const sel = i === State.selectedLive;
+    // Faint ghost of the trimmed-away footage (up to the matched extent) so it's
+    // visible how far the edges can be re-extended.
+    const gx0 = timeToX(c.orig.refIn), gx1 = timeToX(c.orig.refOut);
+    if (gx0 < x0 - 0.5 || gx1 > x1 + 0.5) {
+      ctx.fillStyle = 'rgba(47,93,138,0.22)';
+      if (gx0 < x0) ctx.fillRect(gx0, LIVE_Y0 + 4, x0 - gx0, LIVE_LANE_H - 8);
+      if (gx1 > x1) ctx.fillRect(x1, LIVE_Y0 + 4, gx1 - x1, LIVE_LANE_H - 8);
+    }
+    const w = Math.max(x1 - x0, 1.5);
+    ctx.fillStyle = c.black ? 'rgba(29,47,69,0.85)'
+                  : sel ? 'rgba(80,140,200,0.95)' : 'rgba(47,93,138,0.9)';
+    ctx.fillRect(x0, LIVE_Y0 + 1, w, LIVE_LANE_H - 2);
+    ctx.strokeStyle = sel ? '#a9d2f5' : (c.black ? '#4a6076' : '#7fb2e6');
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeRect(x0 + 0.5, LIVE_Y0 + 1.5, w - 1, LIVE_LANE_H - 3);
+    // edge grips (draggable to trim) — always drawn so the affordance is clear
+    const hw = 3;
+    ctx.fillStyle = sel ? '#cfe8ff' : '#7fb2e6';
+    ctx.fillRect(x0, LIVE_Y0 + 1, hw, LIVE_LANE_H - 2);
+    ctx.fillRect(x1 - hw, LIVE_Y0 + 1, hw, LIVE_LANE_H - 2);
     if (x1 - x0 > 44) {
-      ctx.fillStyle = c.black ? '#8299ad' : '#cfe3f7';
+      ctx.fillStyle = c.black ? '#8299ad' : (sel ? '#eaf5ff' : '#cfe3f7');
       ctx.save();
-      ctx.beginPath(); ctx.rect(x0 + 2, LIVE_Y0, Math.max(0, x1 - x0 - 4), LIVE_LANE_H); ctx.clip();
-      ctx.fillText(`5D2 #${c.i}${c.black ? ' (black)' : ''}`, x0 + 4, LIVE_Y0 + 14);
+      ctx.beginPath(); ctx.rect(x0 + hw + 1, LIVE_Y0, Math.max(0, x1 - x0 - 2 * hw - 2), LIVE_LANE_H); ctx.clip();
+      ctx.fillText(`5D2 #${c.i}${c.black ? ' (black)' : ''}`, x0 + hw + 3, LIVE_Y0 + 14);
       ctx.restore();
     }
   });
@@ -1143,20 +1195,27 @@ function applyLiveDrag(drag, tm) {
 }
 
 // Cut the 5D 2 clip under the playhead into two, leaving a `gap`-second hole
-// (the stationary cameras fill it). Both halves share the clip's envelope so
-// each can still be re-extended up to the original footage — but not into the
-// gap or past the other half. Returns true if a cut was made.
+// (the stationary cameras fill it). Each half's envelope is clamped to its own
+// side of the cut, so re-extending a half can never cross the gap or overlap the
+// other half. Returns true if a cut was made.
 const LIVE_CUT_GAP = 1.0;    // seconds skipped at the cut
 function cutLiveAt(t) {
   const idx = State.liveClips.findIndex(c => t > c.refIn + MIN_LEN && t < c.refOut - MIN_LEN);
   if (idx < 0) return false;
   const c = State.liveClips[idx];
   const half = LIVE_CUT_GAP / 2;
-  if (t - half - c.refIn < MIN_LEN || c.refOut - (t + half) < MIN_LEN) return false;
+  const lOut = +(t - half).toFixed(3), rIn = +(t + half).toFixed(3);
+  if (lOut - c.refIn < MIN_LEN || c.refOut - rIn < MIN_LEN) return false;
   pushUndoLive();
+  const d = c.delta;
   const nextI = Math.max(0, ...State.liveClips.map(x => x.i)) + 1;
-  const right = { ...c, i: nextI, refIn: +(t + half).toFixed(3), orig: { ...c.orig } };
-  c.refOut = +(t - half).toFixed(3);
+  // right half: envelope starts at the cut; left half: envelope ends at the cut
+  const right = {
+    ...c, i: nextI, refIn: rIn,
+    orig: { ...c.orig, refIn: rIn, srcIn: +(rIn - d).toFixed(3) },
+  };
+  c.refOut = lOut;
+  c.orig = { ...c.orig, refOut: lOut, srcOut: +(lOut - d).toFixed(3) };
   State.liveClips.splice(idx + 1, 0, right);
   State.selectedLive = idx;    // keep the left half selected
   markFullDirty(); updateLiveInfo(); saveLiveClips();
@@ -1310,7 +1369,8 @@ function wireTimelineInput() {
   window.addEventListener('mousemove', (e) => {
     if (drag) {
       if (!dragSnapped) {
-        pushUndo(); dragSnapped = true;                       // snapshot on first move
+        (drag.kind === 'live' ? pushUndoLive : pushUndo)();   // snapshot on first move
+        dragSnapped = true;
         if (drag.dupPending) {                                // Alt-drag: clone now
           const clone = { ...State.titles[drag.i] };
           State.titles.push(clone);                           // appended; sorted on mouseup
@@ -1320,6 +1380,7 @@ function wireTimelineInput() {
         }
       }
       if (drag.kind === 'titlemove') moveTitle(drag, xToTime(localX(e)));
+      else if (drag.kind === 'live') applyLiveDrag(drag, xToTime(localX(e)));
       else applyHandleDrag(drag, xToTime(localX(e)));
       return;
     }
@@ -1330,6 +1391,11 @@ function wireTimelineInput() {
   });
   window.addEventListener('mouseup', () => {
     if (drag) {                                     // finalize move/resize, keep selection, autosave
+      if (drag.kind === 'live') {                   // trimmed a 5D 2 clip -> save sync.json
+        if (dragSnapped) saveLiveClips();
+        drag = null;
+        return;
+      }
       if (dragSnapped) {                            // only if it actually moved
         const isTitle = drag.kind !== 'perf';
         const arr = isTitle ? State.titles : State.perfs;
@@ -1356,8 +1422,9 @@ function wireTimelineInput() {
     const r = t.wave.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
     t.wave.style.cursor =
-      (handleHit(x, y) || titleHandleHit(x, y)) ? 'ew-resize'
+      (handleHit(x, y) || titleHandleHit(x, y) || liveHandleHit(x, y)) ? 'ew-resize'
       : titleHit(x, y) >= 0 ? (e.altKey ? 'copy' : 'grab')   // alt = duplicate
+      : liveHit(x, y) >= 0 ? 'pointer'
       : 'default';
   });
 
@@ -1637,6 +1704,19 @@ async function revealThumb(url) {
   } catch (err) {
     flashStatus('⚠ ' + String(err));
   }
+}
+
+// 5D 2 live-clip toolbar: cut at playhead, restore full extent, remove.
+function wireLive() {
+  $('#liveCut').onclick = () => {
+    if (!cutLiveAt(playTime())) {
+      $('#status').textContent = 'move the playhead inside a 5D 2 clip (with room on both sides) to cut';
+    }
+  };
+  $('#liveExtend').onclick = extendLiveFull;
+  $('#liveDelete').onclick = deleteLive;
+  $('#liveClose').onclick = deselectLive;
+  updateLiveInfo();
 }
 
 function wireThumbs() {
@@ -1965,6 +2045,13 @@ function pushUndo() {
 function undo() {
   const snap = State.undoStack.pop();
   if (!snap) return;
+  if (snap.liveClips) {                 // a 5D 2 trim/cut/remove -> revert sync.json
+    State.liveClips = snap.liveClips.map(c => ({ ...c, orig: { ...c.orig } }));
+    State.selectedLive = Math.min(State.selectedLive, State.liveClips.length - 1);
+    markFullDirty(); updateLiveInfo(); saveLiveClips();
+    updateUndoBtn();
+    return;
+  }
   State.perfs = snap.perfs.map(p => ({ ...p }));
   State.titles = (snap.titles || []).map(t => ({ ...t }));
   if (snap.titleScale != null) State.titleScale = snap.titleScale;
@@ -2167,8 +2254,16 @@ function wireKeys() {
       case 'o': case 'O': markOut(); break;
       case 'Enter': addPending(); break;
       case 'Backspace': case 'Delete':
-        if (State.selectedTitle >= 0) { e.preventDefault(); deleteTitle(State.selectedTitle, { confirm: false }); }
+        if (State.selectedLive >= 0) { e.preventDefault(); deleteLive(); }
+        else if (State.selectedTitle >= 0) { e.preventDefault(); deleteTitle(State.selectedTitle, { confirm: false }); }
         else if (State.selected >= 0) { e.preventDefault(); deleteSelected(); }
+        break;
+      case 'c': case 'C':
+        if (e.metaKey || e.ctrlKey) break;   // leave ⌘C (copy) to the browser
+        if (State.selectedLive >= 0) { e.preventDefault(); cutLiveAt(playTime()); }
+        break;
+      case 'Escape':
+        if (State.selectedLive >= 0) { e.preventDefault(); deselectLive(); }
         break;
       case 't': case 'T':
         if (e.metaKey) break;          // leave ⌘T (new tab) to the browser

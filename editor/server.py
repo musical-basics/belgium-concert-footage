@@ -38,6 +38,7 @@ META_PATH = os.path.join(ROOT, "cache", "clips_meta.json")
 WAVE_BIN = os.path.join(ROOT, "cache", "waveform.u8")
 WAVE_META = os.path.join(ROOT, "cache", "waveform.json")
 TRANSCRIPT_PATH = os.path.join(ROOT, "cache", "transcript.json")
+SYNC_JSON = os.path.join(EDITOR_DIR, "sync.json")   # 5D 2 live-camera coverage map
 
 PORT = int(os.environ.get("EDITOR_PORT", "8000"))
 
@@ -269,6 +270,68 @@ def _load(conn):
 def db_load():
     with db_connect() as conn:
         return _load(conn)
+
+
+# ---- 5D 2 live-camera coverage (sync.json) ---------------------------
+# sync.json is the audio-matched map of the 5D 2 reel onto the concert timeline.
+# render.py reads clips[].{ref_in,ref_out,delta} directly to prioritize the live
+# camera, so the editor persists trims/cuts straight into that file. To keep the
+# original matched extent as the outer limit (so a trim is reversible), the first
+# edit of a clip records its matched bounds in an `orig` block; ref_in/ref_out
+# then hold the *effective* (trimmed) window and can never leave `orig`.
+_SYNC_LOCK = threading.Lock()
+
+
+def _sync_load():
+    with open(SYNC_JSON) as f:
+        return json.load(f)
+
+
+def _clip_orig(c):
+    """The matched (max) bounds of a clip — the `orig` block if present, else the
+    clip's own bounds (an as-yet-unedited clip is at full extent)."""
+    o = c.get("orig")
+    if o:
+        return o["src_in"], o["src_out"], o["ref_in"], o["ref_out"]
+    return c["src_in"], c["src_out"], c["ref_in"], c["ref_out"]
+
+
+def save_live_clips(clips):
+    """Replace sync.json's `clips` with `clips` (from the editor), clamping every
+    clip to its own matched envelope and (re)deriving src bounds from ref+delta.
+    Returns the normalized clip list. Serialized so concurrent saves can't race."""
+    with _SYNC_LOCK:
+        doc = _sync_load()
+        clean = []
+        for raw in clips:
+            delta = float(raw["delta"])
+            osi, oso, ori, oro = (float(raw["orig"]["src_in"]), float(raw["orig"]["src_out"]),
+                                  float(raw["orig"]["ref_in"]), float(raw["orig"]["ref_out"]))
+            # effective ref window, clamped inside the matched envelope
+            ri = max(ori, min(float(raw["ref_in"]), oro))
+            ro = min(oro, max(float(raw["ref_out"]), ri))
+            c = {
+                "i": raw["i"],
+                "src_in": round(ri - delta, 3), "src_out": round(ro - delta, 3),
+                "ref_in": round(ri, 3), "ref_out": round(ro, 3),
+                "delta": round(delta, 3),
+                "dur": round(ro - ri, 3),
+                "orig": {"src_in": round(osi, 3), "src_out": round(oso, 3),
+                         "ref_in": round(ori, 3), "ref_out": round(oro, 3)},
+                "flags": list(raw.get("flags") or []),
+            }
+            for k in ("env_score", "phat_locks", "phat_q"):
+                if raw.get(k) is not None:
+                    c[k] = raw[k]
+            clean.append(c)
+        clean.sort(key=lambda c: c["ref_in"])
+        doc["clips"] = clean
+        doc["edited"] = "trimmed/cut in editor"
+        tmp = SYNC_JSON + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(doc, f, indent=1)
+        os.replace(tmp, SYNC_JSON)
+        return clean
 
 
 def _bump_write_count(conn):
@@ -1012,6 +1075,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 500)
             return self._send_json({"ok": True, "saved": DB_PATH})
+        if path == "/api/live-clips":
+            # Persist trimmed/split 5D 2 coverage back to editor/sync.json so the
+            # renderer (which reads that file) honors the new live-camera windows.
+            try:
+                body = self._read_json()
+                clips = body["clips"] if isinstance(body, dict) else body
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            try:
+                saved = save_live_clips(clips)
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+            return self._send_json({"ok": True, "clips": saved, "saved": SYNC_JSON})
         if path == "/api/titles":
             # Additive title API for the external agent: append one title (a bare
             # object) or many ({"titles":[...]}), without touching anything else.

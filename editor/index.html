@@ -110,8 +110,17 @@
       <button id="zoomOut" title="Zoom out (−)">−</button>
       <button id="zoomIn" title="Zoom in (+)">+</button>
       <span id="zoomLabel" class="zoomlabel">—</span>
-      <span class="tlhint">wheel = zoom · drag waveform = scrub · drag block edges = adjust in/out · drag title body = move · ⌥drag title = duplicate · drag minimap = pan · click block = select</span>
+      <span class="tlhint">wheel = zoom · drag waveform = scrub · drag block edges = adjust in/out · drag title body = move · ⌥drag title = duplicate · click 5D 2 clip = select, drag its edges = trim, C = cut at playhead · drag minimap = pan</span>
       <span id="waveStatus" class="wavestatus"></span>
+    </div>
+    <div id="livebar" hidden>
+      <span class="livetag">5D 2</span>
+      <span id="liveInfo" class="liveinfo">—</span>
+      <div class="spacer"></div>
+      <button id="liveCut" title="Cut the selected 5D 2 clip at the playhead (skip the gap) — C">✂ Cut at playhead</button>
+      <button id="liveExtend" title="Restore this clip to its full matched footage">⤢ Full extent</button>
+      <button id="liveDelete" class="danger" title="Drop 5D 2 coverage for this clip (⌫)">✕ Remove</button>
+      <button id="liveClose" title="Deselect (Esc)">Done</button>
     </div>
     <canvas id="wave"></canvas>
     <canvas id="overview"></canvas>
