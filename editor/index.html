@@ -139,7 +139,13 @@
   </section>
 
   <section id="panel">
-    <div id="formCard" class="card">
+   <div class="col1">
+    <div class="tabstrip">
+      <button class="tab sel" data-tab="perf">New performance</button>
+      <button class="tab" data-tab="color">🎨 Camera color</button>
+    </div>
+
+    <div id="formCard" class="card tabpane" data-tab="perf">
       <h3 id="formTitle">New performance</h3>
       <div class="row">
         <label>Title<input id="fTitle" placeholder="e.g. Clair de Lune" /></label>
@@ -157,6 +163,22 @@
         <button id="formDelete" class="danger" hidden>Delete</button>
       </div>
     </div>
+
+    <div id="colorCard" class="card tabpane" data-tab="color" hidden>
+      <div class="card-head">
+        <h3>Camera color <span id="colorInlineStatus" class="trstatus">—</span></h3>
+        <button id="colorInlineReset" class="small">↺ Reset all</button>
+      </div>
+      <p class="cardhint">Per-camera grade for the render &amp; thumbnails. Panes
+        update live as you drag (close approximation — the render is the true
+        result). Takes effect on <b>Save color</b>.</p>
+      <div id="colorCamsInline" class="color-cams"></div>
+      <div class="modal-foot">
+        <div class="spacer"></div>
+        <button id="colorInlineSave" class="primary small">Save color</button>
+      </div>
+    </div>
+   </div>
 
     <div class="card">
       <div class="card-head">

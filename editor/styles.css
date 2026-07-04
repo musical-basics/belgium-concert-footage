@@ -135,6 +135,17 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 }
 
 #panel { flex: 1; display: grid; grid-template-columns: 1fr 1.2fr 1fr; gap: 12px; overflow: hidden; }
+/* first column: a tab strip over a stack of tab panes (New performance / Color) */
+.col1 { display: flex; flex-direction: column; gap: 8px; overflow: hidden; min-height: 0; }
+.tabstrip { display: flex; gap: 6px; flex-shrink: 0; }
+.tabstrip .tab {
+  padding: 5px 11px; font-size: 12px; background: var(--panel); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 7px 7px 0 0; border-bottom: none;
+}
+.tabstrip .tab.sel { color: var(--text); background: var(--panel2); border-color: var(--accent2); }
+.tabstrip .tab:hover { color: var(--text); }
+.col1 .tabpane { flex: 1; min-height: 0; margin: 0; }
+.col1 .tabpane[hidden] { display: none; }
 .cardhint { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 0 0 10px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px; overflow: auto; }
 .card h3 { margin: 0 0 10px; font-size: 13px; }
