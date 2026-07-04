@@ -117,7 +117,7 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 .tlhint { color: var(--muted); font-size: 11px; }
 .wavestatus { color: var(--warn); font-size: 11px; margin-left: auto; }
 #wave {
-  display: block; width: 100%; height: 150px; background: var(--panel);
+  display: block; width: 100%; height: 170px; background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px; cursor: crosshair;
 }
 #overview {

@@ -57,11 +57,14 @@ const MIN_SPAN = 4;                // most-zoomed-in window (seconds)
 
 // Timeline vertical layout (px from the top of the wave canvas):
 //   0 .. TICK_H        time ticks / labels
-//   TICK_H .. PERF_Y0  the title lane (text-overlay regions)
+//   TICK_H .. LIVE_Y0  the title lane (text-overlay regions)
+//   LIVE_Y0 .. PERF_Y0 the live-camera lane (audio-matched 5D 2 scenes)
 //   PERF_Y0 .. h       the performance blocks
 const TICK_H = 14;
 const TITLE_LANE_H = 24;
-const PERF_Y0 = TICK_H + TITLE_LANE_H;
+const LIVE_LANE_H = 20;
+const LIVE_Y0 = TICK_H + TITLE_LANE_H;
+const PERF_Y0 = LIVE_Y0 + LIVE_LANE_H;
 
 // Title word-wrap limits — must match render/render.py so the live preview's
 // line breaks are identical to the burned-in render.
@@ -93,7 +96,8 @@ async function boot() {
   try {
     const sync = await fetch('/editor/sync.json').then(r => r.json());
     State.liveClips = (sync.clips || []).map(c => (
-      { refIn: c.ref_in, refOut: c.ref_out, delta: c.delta }));
+      { i: c.i, refIn: c.ref_in, refOut: c.ref_out, delta: c.delta,
+        black: (c.flags || []).includes('black-video') }));
   } catch { State.liveClips = []; }
 
   buildVideos();
@@ -841,6 +845,12 @@ function rebuildOverviewStatic() {
     ctx.fillStyle = 'rgba(192,132,252,0.85)';
     ctx.fillRect(x0, 0, Math.max(2, x1 - x0), 3);
   });
+  // live-camera coverage: steel-blue marks along the bottom
+  (State.liveClips || []).forEach((c) => {
+    const x0 = c.refIn / State.duration * t.ow, x1 = c.refOut / State.duration * t.ow;
+    ctx.fillStyle = c.black ? 'rgba(74,96,118,0.8)' : 'rgba(127,178,230,0.9)';
+    ctx.fillRect(x0, t.oh - 3, Math.max(2, x1 - x0), 3);
+  });
 }
 
 function rebuildStatic() {
@@ -861,6 +871,31 @@ function rebuildStatic() {
     ctx.beginPath(); ctx.moveTo(x, 12); ctx.lineTo(x, t.h); ctx.stroke();
     ctx.fillStyle = 'rgba(160,170,190,0.85)';
     ctx.fillText(step < 1 ? tm.toFixed(1) + 's' : fmtClock(tm), x + 3, 10);
+  }
+
+  // live-camera lane: the 5D 2 scenes lined up on the concert timeline
+  // (same steel-blue blocks as sync.html; gaps = the 5D 2 wasn't rolling)
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(0, LIVE_Y0, t.w, LIVE_LANE_H);
+  (State.liveClips || []).forEach((c) => {
+    const x0 = timeToX(c.refIn), x1 = timeToX(c.refOut);
+    if (x1 < 0 || x0 > t.w) return;
+    ctx.fillStyle = c.black ? 'rgba(29,47,69,0.85)' : 'rgba(47,93,138,0.9)';
+    ctx.fillRect(x0, LIVE_Y0 + 1, Math.max(x1 - x0, 1.5), LIVE_LANE_H - 2);
+    ctx.strokeStyle = c.black ? '#4a6076' : '#7fb2e6';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x0 + 0.5, LIVE_Y0 + 1.5, Math.max(x1 - x0, 1.5) - 1, LIVE_LANE_H - 3);
+    if (x1 - x0 > 44) {
+      ctx.fillStyle = c.black ? '#8299ad' : '#cfe3f7';
+      ctx.save();
+      ctx.beginPath(); ctx.rect(x0 + 2, LIVE_Y0, Math.max(0, x1 - x0 - 4), LIVE_LANE_H); ctx.clip();
+      ctx.fillText(`5D2 #${c.i}${c.black ? ' (black)' : ''}`, x0 + 4, LIVE_Y0 + 14);
+      ctx.restore();
+    }
+  });
+  if ((State.liveClips || []).length) {
+    ctx.fillStyle = 'rgba(127,178,230,0.55)';
+    ctx.fillText('5D 2', 3, LIVE_Y0 + 14);
   }
 
   // performance blocks
@@ -981,8 +1016,8 @@ function handleHit(x, y) {
   return null;
 }
 
-// Title-lane equivalents (the purple band, TICK_H .. PERF_Y0).
-const inTitleLane = (y) => y >= TICK_H && y < PERF_Y0;
+// Title-lane equivalents (the purple band, TICK_H .. LIVE_Y0).
+const inTitleLane = (y) => y >= TICK_H && y < LIVE_Y0;
 
 function titleHit(x, y) {
   if (!inTitleLane(y)) return -1;
