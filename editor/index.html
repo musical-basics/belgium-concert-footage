@@ -7,6 +7,10 @@
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+<!-- Per-camera color grade filters (SVG) — replicate ffmpeg `eq` (contrast ->
+     brightness -> gamma on luma, plus saturation) so the pane preview matches
+     the render exactly. Populated by app.js; referenced via filter: url(#...). -->
+<svg id="gradeFilters" width="0" height="0" style="position:absolute" aria-hidden="true"></svg>
 <header id="topbar">
   <div class="brand">🎹 Belgium Concert — Performance Marker</div>
   <div class="status" id="status">loading…</div>
@@ -70,10 +74,10 @@
       Per-camera color grade applied to the final render <b>and</b> the
       thumbnails. <b>Brightness</b> is exposure (0 = none), <b>Gamma</b> lifts
       midtones (1 = none), plus <b>Contrast</b> and <b>Saturation</b> (1 = none).
-      The camera panes update live as you drag (a close CSS approximation —
-      gamma especially isn't exact); the thumbnails and render are the true
-      result. Changes take effect on <b>Save</b>. Each camera has its own
-      <b>Reset</b> back to the built-in default.
+      The camera panes update live as you drag — a WYSIWYG match for the render
+      (the same contrast → brightness → gamma → saturation math). Changes take
+      effect on <b>Save</b>. Each camera has its own <b>Reset</b> back to the
+      built-in default.
     </div>
     <div id="colorCams" class="color-cams"></div>
     <div class="modal-foot">
@@ -170,8 +174,8 @@
         <button id="colorInlineReset" class="small">↺ Reset all</button>
       </div>
       <p class="cardhint">Per-camera grade for the render &amp; thumbnails. Panes
-        update live as you drag (close approximation — the render is the true
-        result). Takes effect on <b>Save color</b>.</p>
+        update live as you drag — a WYSIWYG match for the render. Takes effect on
+        <b>Save color</b>.</p>
       <div id="colorCamsInline" class="color-cams"></div>
       <div class="modal-foot">
         <div class="spacer"></div>

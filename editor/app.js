@@ -281,26 +281,86 @@ function buildVideos() {
 }
 
 // ---- live color-grade preview on the camera panes -----------------------
-// The proxies are ungraded, so approximate render.py's per-camera ffmpeg `eq`
-// with a CSS filter on each <video>. The math isn't identical (ffmpeg gamma has
-// no CSS equivalent, and its brightness is additive vs CSS's multiplicative), so
-// this is a close *preview*, not the exact render — good enough to judge a grade.
-function gradeToCssFilter(g) {
-  if (!g) return 'none';
-  const b = +g.brightness || 0;           // ffmpeg additive, -1..1
-  const gamma = +g.gamma || 1;            // ffmpeg power curve, no CSS equiv
-  const contrast = +g.contrast || 1;      // ~matches CSS contrast()
-  const sat = +g.saturation || 1;         // ~matches CSS saturate()
-  // Fold additive brightness + gamma>1 midtone lift into one multiplicative
-  // brightness factor. gamma lifts midtones ~ (0.5^(1/gamma))/0.5 at mid-grey;
-  // use that as the multiplier so a gamma bump reads brighter like the render.
-  const gammaLift = gamma > 0 ? Math.pow(0.5, 1 / gamma) / 0.5 : 1;
-  const bright = (1 + b) * gammaLift;
-  const parts = [];
-  if (Math.abs(bright - 1) > 1e-3) parts.push(`brightness(${bright.toFixed(3)})`);
-  if (Math.abs(contrast - 1) > 1e-3) parts.push(`contrast(${contrast.toFixed(3)})`);
-  if (Math.abs(sat - 1) > 1e-3) parts.push(`saturate(${sat.toFixed(3)})`);
-  return parts.length ? parts.join(' ') : 'none';
+// The proxies are ungraded, so replicate render.py's per-camera ffmpeg `eq`
+// EXACTLY with an SVG filter on each <video>, so the preview is WYSIWYG with the
+// export. ffmpeg eq on luma (verified): contrast -> brightness -> gamma, i.e.
+//   y1 = (y - 0.5)*contrast + 0.5      (contrast)
+//   y2 = y1 + brightness              (brightness, additive)
+//   y3 = pow(clamp(y2,0,1), 1/gamma)  (gamma)
+// plus a luma-preserving saturation on chroma. SVG feComponentTransfer does the
+// contrast+brightness as one linear pass, then gamma as a second pass; saturation
+// is feColorMatrix type="saturate". Each unique grade gets one cached <filter>.
+const _svgNS = 'http://www.w3.org/2000/svg';
+const _gradeFilterIds = {};   // grade-key -> filter id (dedup)
+let _gradeFilterSeq = 0;
+
+function _gradeKey(g) {
+  return `${+g.brightness || 0}|${+g.gamma || 1}|${+g.contrast || 1}|${+g.saturation || 1}`;
+}
+
+// True if this grade is a no-op (all knobs neutral) -> no filter needed.
+function _gradeNeutral(g) {
+  return Math.abs((+g.brightness || 0)) < 1e-6 &&
+         Math.abs((+g.gamma || 1) - 1) < 1e-6 &&
+         Math.abs((+g.contrast || 1) - 1) < 1e-6 &&
+         Math.abs((+g.saturation || 1) - 1) < 1e-6;
+}
+
+// Ensure an SVG <filter> exists that reproduces this grade; return its id (or ''
+// for a neutral grade). Filters are cached by value so we don't churn the DOM.
+function ensureGradeFilter(g) {
+  if (!g || _gradeNeutral(g)) return '';
+  const key = _gradeKey(g);
+  if (_gradeFilterIds[key]) return _gradeFilterIds[key];
+  const b = +g.brightness || 0, gamma = +g.gamma || 1;
+  const contrast = +g.contrast || 1, sat = +g.saturation || 1;
+  const svg = document.getElementById('gradeFilters');
+  const id = `grade${_gradeFilterSeq++}`;
+  const filter = document.createElementNS(_svgNS, 'filter');
+  filter.setAttribute('id', id);
+  // Work in the source color space (not linearized) to match ffmpeg's 8-bit eq.
+  filter.setAttribute('color-interpolation-filters', 'sRGB');
+
+  // Pass 1: contrast + brightness as one linear transfer per RGB channel.
+  // combined: out = contrast*in + (0.5 - 0.5*contrast + brightness)
+  const slope = contrast;
+  const intercept = 0.5 - 0.5 * contrast + b;
+  const lin = document.createElementNS(_svgNS, 'feComponentTransfer');
+  for (const ch of ['R', 'G', 'B']) {
+    const fn = document.createElementNS(_svgNS, `feFunc${ch}`);
+    fn.setAttribute('type', 'linear');
+    fn.setAttribute('slope', slope.toFixed(5));
+    fn.setAttribute('intercept', intercept.toFixed(5));
+    lin.appendChild(fn);
+  }
+  filter.appendChild(lin);
+
+  // Pass 2: gamma. SVG gamma transfer = amplitude*pow(C, exponent)+offset, so
+  // exponent = 1/gamma reproduces ffmpeg's pow(in, 1/gamma).
+  if (Math.abs(gamma - 1) > 1e-6) {
+    const gam = document.createElementNS(_svgNS, 'feComponentTransfer');
+    for (const ch of ['R', 'G', 'B']) {
+      const fn = document.createElementNS(_svgNS, `feFunc${ch}`);
+      fn.setAttribute('type', 'gamma');
+      fn.setAttribute('amplitude', '1');
+      fn.setAttribute('exponent', (1 / gamma).toFixed(5));
+      fn.setAttribute('offset', '0');
+      gam.appendChild(fn);
+    }
+    filter.appendChild(gam);
+  }
+
+  // Pass 3: saturation (luma-preserving), matches ffmpeg eq saturation closely.
+  if (Math.abs(sat - 1) > 1e-6) {
+    const cm = document.createElementNS(_svgNS, 'feColorMatrix');
+    cm.setAttribute('type', 'saturate');
+    cm.setAttribute('values', sat.toFixed(5));
+    filter.appendChild(cm);
+  }
+
+  svg.appendChild(filter);
+  _gradeFilterIds[key] = id;
+  return id;
 }
 
 // Apply the current grades (State.camGrades) to each camera pane. Pass an
@@ -310,7 +370,8 @@ function applyCameraFilters(override) {
     const v = State.videos[i];
     if (!v) return;
     const g = (override && override[c.id]) || State.camGrades[c.id];
-    v.style.filter = gradeToCssFilter(g);
+    const id = ensureGradeFilter(g);
+    v.style.filter = id ? `url(#${id})` : 'none';
   });
 }
 
