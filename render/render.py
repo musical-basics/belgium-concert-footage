@@ -35,7 +35,7 @@ OUT_DIR = os.path.join(ROOT, "output")
 SEG_DIR = os.path.join(ROOT, "cache", "segments")
 
 SOURCES = {
-    "back": "Main Footage/back camera v2.mov",
+    "back": "Main Footage/back camera v3.mov",
     "livestream": "Main Footage/Livestream Footage.mov",
     "piano": "Main Footage/camera next to piano.mov",
     "5d2": "5D 2.mp4",   # roving live camera; timeline mapping via SYNC_JSON
@@ -164,9 +164,11 @@ VF = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
 # Per-camera color correction, prepended to the common VF. The Back Camera is
 # underexposed vs the other two, so lift its midtones with gamma (preserves the
 # deep blacks / saturated stage lights better than a flat brightness offset).
-# Tune the numbers here if it needs more/less.
+# 5D 2 also reads dark, so give it a gentler gamma lift. Tune the numbers here
+# if it needs more/less.
 CAMERA_EQ = {
     "back": "eq=contrast=1.18:gamma=1.62:saturation=1.05",
+    "5d2":  "eq=gamma=1.35:saturation=1.03",
 }
 
 

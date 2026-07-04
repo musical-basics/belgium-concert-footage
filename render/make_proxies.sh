@@ -9,7 +9,7 @@ OUT="proxies"
 mkdir -p "$OUT"
 
 # name pairs: source file -> proxy id
-declare -a NAMES=("back camera v2" "Livestream Footage" "camera next to piano")
+declare -a NAMES=("back camera v3" "Livestream Footage" "camera next to piano")
 declare -a IDS=("back" "livestream" "piano")
 
 for i in "${!NAMES[@]}"; do
