@@ -503,9 +503,38 @@ def _thumbs_worker(index, perf):
             info["status"] = "done" if thumbs else "error"
             if not thumbs:
                 info["error"] = "no frames could be extracted"
+            else:
+                # Sidecar so existing thumbs (with captions) survive a restart
+                # and can be shown without regenerating.
+                with open(os.path.join(out_dir, "meta.json"), "w") as f:
+                    json.dump({"thumbs": thumbs}, f)
     except Exception as e:
         info["status"] = "error"
         info["error"] = str(e)
+
+
+def thumbs_on_disk(index):
+    """The thumbnails already generated for a performance (1-based), read from
+    the meta.json sidecar; falls back to scanning *.jpg if it's missing. Empty
+    list if none exist. Lets the editor show existing frames after a restart
+    without re-running ffmpeg."""
+    out_dir = os.path.join(THUMBS_DIR, f"{index:02d}")
+    if not os.path.isdir(out_dir):
+        return []
+    meta = os.path.join(out_dir, "meta.json")
+    if os.path.isfile(meta):
+        try:
+            with open(meta) as f:
+                thumbs = json.load(f).get("thumbs", [])
+            # Keep only entries whose jpg is actually present.
+            return [t for t in thumbs
+                    if os.path.isfile(os.path.join(out_dir, os.path.basename(t["url"])))]
+        except Exception:
+            pass
+    # No/broken sidecar: reconstruct a bare list from the jpg files.
+    jpgs = sorted(fn for fn in os.listdir(out_dir) if fn.endswith(".jpg"))
+    return [{"url": f"/thumbs/{index:02d}/{fn}", "t": None,
+             "camera": None, "camera_label": ""} for fn in jpgs]
 
 
 def start_thumbs(index):
@@ -530,14 +559,25 @@ def start_thumbs(index):
 
 
 def thumbs_status(index):
-    """Snapshot of one performance's thumbnail job (or a bare 'idle')."""
+    """Snapshot of one performance's thumbnail state. If a job for this
+    performance ran this session, report it; otherwise fall back to whatever is
+    already on disk (status 'done' with those frames, or 'idle' if none) so a
+    fresh page/server still shows existing thumbnails."""
     with _THUMBS_LOCK:
         info = _THUMBS.get(index)
-        if not info:
-            return {"status": "idle", "thumbs": []}
-        return {"status": info["status"], "done": info.get("done", 0),
-                "total": info.get("total", N_THUMBS),
-                "thumbs": info.get("thumbs", []), "error": info.get("error")}
+        if info and info["status"] in ("queued", "running"):
+            return {"status": info["status"], "done": info.get("done", 0),
+                    "total": info.get("total", N_THUMBS),
+                    "thumbs": info.get("thumbs", []), "error": info.get("error")}
+        if info and info["status"] == "error":
+            return {"status": "error", "done": info.get("done", 0),
+                    "total": info.get("total", N_THUMBS),
+                    "thumbs": info.get("thumbs", []), "error": info.get("error")}
+    # No active/errored job -> reflect the disk (this covers 'done this session'
+    # AND thumbnails from a previous session/server).
+    disk = thumbs_on_disk(index)
+    return {"status": "done" if disk else "idle",
+            "done": len(disk), "total": N_THUMBS, "thumbs": disk, "error": None}
 
 
 def output_file_map():

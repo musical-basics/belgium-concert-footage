@@ -1334,12 +1334,35 @@ function flashStatus(msg) {
 let _thumbPollTimer = null;
 let _thumbIndex = null;   // 1-based perf index the modal is currently showing
 
+// Open the thumbnails modal for a performance. If frames already exist on disk,
+// show them right away (with a Regenerate button); only generate when there are
+// none. Regenerate always re-runs from scratch.
 async function generateThumbs(i) {
   const index = i + 1;
   _thumbIndex = index;
-  if (State.dirty) await save({ auto: true });   // server reads current markers
   openThumbsModal(State.perfs[i], index);
+  setThumbsStatus('checking…');
+  let data;
+  try { data = await fetch(`/api/thumbnails?index=${index}`).then(r => r.json()); }
+  catch { data = { status: 'idle', thumbs: [] }; }
+  if (_thumbIndex !== index) return;               // modal closed/switched
+  if (data.status === 'running' || data.status === 'queued') {
+    pollThumbs();                                   // a job is already in flight
+  } else if ((data.thumbs || []).length) {
+    renderThumbsGrid(data.thumbs);                  // existing sheet — just show it
+    setThumbsStatus(`${data.thumbs.length} thumbnails · Regenerate to refresh`);
+  } else {
+    startThumbsJob(index);                          // none yet — generate
+  }
+}
+
+// Kick a (re)generation job for the performance the modal is showing.
+async function startThumbsJob(index) {
+  setThumbsBusy(true);
+  if (State.dirty) await save({ auto: true });     // server reads current markers
+  if (_thumbIndex !== index) return;
   setThumbsStatus('starting…');
+  renderThumbsGrid([]);
   try {
     const res = await fetch('/api/thumbnails', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1363,12 +1386,15 @@ async function pollThumbs() {
   if (_thumbIndex !== index) return;             // modal moved on / closed
   renderThumbsGrid(data.thumbs || []);
   if (data.status === 'running' || data.status === 'queued') {
+    setThumbsBusy(true);
     setThumbsStatus(`generating… ${data.done || 0}/${data.total || 10}`);
     _thumbPollTimer = setTimeout(pollThumbs, 700);
   } else if (data.status === 'error') {
+    setThumbsBusy(false);
     setThumbsStatus('⚠ ' + (data.error || 'failed'));
   } else {
-    setThumbsStatus(`${(data.thumbs || []).length} thumbnails · click one to open full size`);
+    setThumbsBusy(false);
+    setThumbsStatus(`${(data.thumbs || []).length} thumbnails · Regenerate to refresh`);
   }
 }
 
@@ -1376,10 +1402,19 @@ function openThumbsModal(perf, index) {
   const modal = $('#thumbsModal');
   $('#thumbsTitle').textContent = `Thumbnails — ${index}. ${perf.title || 'performance'}`;
   renderThumbsGrid([]);
+  setThumbsBusy(false);
   modal.hidden = false;
 }
 
 function setThumbsStatus(msg) { $('#thumbsStatus').textContent = msg; }
+
+// Disable Regenerate (and label it) while a job is running.
+function setThumbsBusy(busy) {
+  const btn = $('#thumbsRegen');
+  if (!btn) return;
+  btn.disabled = busy;
+  btn.textContent = busy ? '⏳ generating…' : '↻ Regenerate';
+}
 
 function renderThumbsGrid(thumbs) {
   const grid = $('#thumbsGrid');
@@ -1388,11 +1423,13 @@ function renderThumbsGrid(thumbs) {
     const fig = document.createElement('figure');
     fig.className = 'thumb';
     const viewer = `/thumb-view?url=${encodeURIComponent(th.url)}`;
+    const cap = [th.camera_label || th.camera, th.t != null ? fmtTC(th.t) : null]
+      .filter(Boolean).map(escapeHtml).join(' · ') || '—';
     fig.innerHTML = `
       <a href="${viewer}" target="_blank" rel="noopener">
-        <img src="${th.url}" loading="lazy" alt="${escapeHtml(th.camera_label || '')} @ ${fmtTC(th.t)}" />
+        <img src="${th.url}" loading="lazy" alt="${cap}" />
       </a>
-      <figcaption>${escapeHtml(th.camera_label || th.camera)} · ${fmtTC(th.t)}</figcaption>
+      <figcaption>${cap}</figcaption>
       <button class="small reveal-btn" data-url="${th.url}" title="Reveal this file in Finder">📂 Show in Finder</button>`;
     grid.appendChild(fig);
   });
@@ -1420,6 +1457,7 @@ function wireThumbs() {
     if (_thumbPollTimer) { clearTimeout(_thumbPollTimer); _thumbPollTimer = null; }
   };
   $('#thumbsClose').onclick = close;
+  $('#thumbsRegen').onclick = () => { if (_thumbIndex != null) startThumbsJob(_thumbIndex); };
   modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
   // "Show in Finder" on any thumbnail (delegated — grid is re-rendered on poll).
   $('#thumbsGrid').addEventListener('click', (e) => {
