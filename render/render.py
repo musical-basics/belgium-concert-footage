@@ -168,7 +168,7 @@ VF = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
 # if it needs more/less.
 CAMERA_EQ = {
     "back": "eq=contrast=1.18:gamma=1.62:saturation=1.05",
-    "5d2":  "eq=gamma=1.35:saturation=1.03",
+    "5d2":  "eq=brightness=0.06:gamma=1.75:saturation=1.03",
 }
 
 
