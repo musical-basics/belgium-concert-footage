@@ -462,14 +462,20 @@ def _thumb_shots(t_in, t_out, r):
 
 
 def _extract_thumb(r, cam, src_t, dst):
-    """One full-res JPEG frame at src_t from camera `cam`, graded like the
-    render. Fast seek (-ss before -i) + a single frame."""
+    """One JPEG frame at src_t from camera `cam`, at the render's output
+    resolution (render.W x render.H, 1080p) and graded + letterboxed exactly
+    like the export so a thumbnail matches the final frame. Fast seek (-ss
+    before -i) + a single frame."""
     eq = r.CAMERA_EQ.get(cam)
-    vf = f"{eq},scale=640:-2" if eq else "scale=640:-2"
+    # Same scale/pad framing render.py uses (W/H, keep aspect, centre-pad), with
+    # the per-camera grade prepended. Drop the video-only fps/setpts bits.
+    scale_pad = (f"scale={r.W}:{r.H}:force_original_aspect_ratio=decrease,"
+                 f"pad={r.W}:{r.H}:(ow-iw)/2:(oh-ih)/2")
+    vf = f"{eq},{scale_pad}" if eq else scale_pad
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
          "-ss", f"{src_t:.3f}", "-i", r.src_path(cam),
-         "-frames:v", "1", "-vf", vf, "-q:v", "3", dst],
+         "-frames:v", "1", "-vf", vf, "-q:v", "2", dst],
         check=True)
 
 
