@@ -38,8 +38,10 @@ const State = {
   activeCam: null,     // camera id shown at the current playhead (per the plan)
   titles: [],          // on-screen text overlays {text, subtitle, in, out, x, y, scale}
   selectedTitle: -1,
+  selectedLive: -1,    // index of the selected 5D 2 live clip (for trim/cut)
   titleScale: 1,       // global title font multiplier (project-wide)
   titleOverlays: [],   // per-camera-pane preview overlays [{box,block,main,sub,video}]
+  camGrades: {},       // camId -> {brightness,gamma,contrast,saturation} (active grade, for live preview)
   previewTitle: null,  // the title currently shown in the preview (for drag)
   snap: { x: false, y: false },   // center-lock guides active on each axis (while dragging)
   seed: 42,
@@ -95,11 +97,10 @@ async function boot() {
   // source time is t - delta inside each matched clip, no footage elsewhere.
   try {
     const sync = await fetch('/editor/sync.json').then(r => r.json());
-    State.liveClips = (sync.clips || []).map(c => (
-      { i: c.i, refIn: c.ref_in, refOut: c.ref_out, delta: c.delta,
-        black: (c.flags || []).includes('black-video') }));
+    State.liveClips = (sync.clips || []).map(toLiveClip);
   } catch { State.liveClips = []; }
 
+  await loadCamGrades();     // active per-camera grade -> live preview filters
   buildVideos();
   buildAudioSelect();
 
@@ -181,6 +182,34 @@ function updateStatus() {
   $('#status').textContent = msg;
 }
 
+/* ---------------------------------------------------- 5D 2 live coverage */
+// sync.json clip -> editor model. `orig` (matched max bounds) is the outer
+// limit a trim/cut can never leave; when absent (never edited) the clip's own
+// bounds are the max. refIn/refOut are the *effective* (trimmed) window that
+// the renderer honors; delta maps concert time -> 5D 2 source time (src = ref - delta).
+function toLiveClip(c) {
+  const o = c.orig || { src_in: c.src_in, src_out: c.src_out,
+                        ref_in: c.ref_in, ref_out: c.ref_out };
+  return {
+    i: c.i, refIn: c.ref_in, refOut: c.ref_out, delta: c.delta,
+    black: (c.flags || []).includes('black-video'),
+    flags: c.flags || [],
+    env_score: c.env_score, phat_locks: c.phat_locks, phat_q: c.phat_q,
+    orig: { srcIn: o.src_in, srcOut: o.src_out, refIn: o.ref_in, refOut: o.ref_out },
+  };
+}
+
+// Serialize the editor's live clips back to sync.json's clip shape.
+function liveClipsPayload() {
+  return (State.liveClips || []).map(c => ({
+    i: c.i, ref_in: c.refIn, ref_out: c.refOut, delta: c.delta,
+    flags: c.flags || [],
+    env_score: c.env_score, phat_locks: c.phat_locks, phat_q: c.phat_q,
+    orig: { src_in: c.orig.srcIn, src_out: c.orig.srcOut,
+            ref_in: c.orig.refIn, ref_out: c.orig.refOut },
+  }));
+}
+
 /* --------------------------------------------------------------- videos */
 // Concert time -> live-camera source time, or null where the live camera
 // has no footage.
@@ -247,6 +276,41 @@ function buildVideos() {
     State.titleOverlays.push(ov);
   });
   wireTitlePosDrag();
+  applyCameraFilters();
+}
+
+// ---- live color-grade preview on the camera panes -----------------------
+// The proxies are ungraded, so approximate render.py's per-camera ffmpeg `eq`
+// with a CSS filter on each <video>. The math isn't identical (ffmpeg gamma has
+// no CSS equivalent, and its brightness is additive vs CSS's multiplicative), so
+// this is a close *preview*, not the exact render — good enough to judge a grade.
+function gradeToCssFilter(g) {
+  if (!g) return 'none';
+  const b = +g.brightness || 0;           // ffmpeg additive, -1..1
+  const gamma = +g.gamma || 1;            // ffmpeg power curve, no CSS equiv
+  const contrast = +g.contrast || 1;      // ~matches CSS contrast()
+  const sat = +g.saturation || 1;         // ~matches CSS saturate()
+  // Fold additive brightness + gamma>1 midtone lift into one multiplicative
+  // brightness factor. gamma lifts midtones ~ (0.5^(1/gamma))/0.5 at mid-grey;
+  // use that as the multiplier so a gamma bump reads brighter like the render.
+  const gammaLift = gamma > 0 ? Math.pow(0.5, 1 / gamma) / 0.5 : 1;
+  const bright = (1 + b) * gammaLift;
+  const parts = [];
+  if (Math.abs(bright - 1) > 1e-3) parts.push(`brightness(${bright.toFixed(3)})`);
+  if (Math.abs(contrast - 1) > 1e-3) parts.push(`contrast(${contrast.toFixed(3)})`);
+  if (Math.abs(sat - 1) > 1e-3) parts.push(`saturate(${sat.toFixed(3)})`);
+  return parts.length ? parts.join(' ') : 'none';
+}
+
+// Apply the current grades (State.camGrades) to each camera pane. Pass an
+// optional {camId: grade} override map for a live modal preview without saving.
+function applyCameraFilters(override) {
+  State.clips.forEach((c, i) => {
+    const v = State.videos[i];
+    if (!v) return;
+    const g = (override && override[c.id]) || State.camGrades[c.id];
+    v.style.filter = gradeToCssFilter(g);
+  });
 }
 
 // The 16:9 frame rect (px, relative to #videos) inside a letterboxed <video>.
@@ -1040,6 +1104,119 @@ function titleHandleHit(x, y) {
   return null;
 }
 
+// Live (5D 2) lane — the steel-blue band, LIVE_Y0 .. PERF_Y0.
+const inLiveLane = (y) => y >= LIVE_Y0 && y < PERF_Y0;
+
+function liveHit(x, y) {
+  if (!inLiveLane(y)) return -1;
+  for (let i = State.liveClips.length - 1; i >= 0; i--) {
+    const c = State.liveClips[i];
+    if (x >= timeToX(c.refIn) && x <= timeToX(c.refOut)) return i;
+  }
+  return -1;
+}
+
+function liveHandleHit(x, y) {
+  if (!inLiveLane(y)) return null;
+  for (let i = State.liveClips.length - 1; i >= 0; i--) {
+    const c = State.liveClips[i];
+    if (Math.abs(x - timeToX(c.refIn))  <= HANDLE_TOL) return { i, edge: 'in' };
+    if (Math.abs(x - timeToX(c.refOut)) <= HANDLE_TOL) return { i, edge: 'out' };
+  }
+  return null;
+}
+
+// Live-adjust a 5D 2 clip edge. The clip has real footage only within its
+// matched envelope (orig), so a handle clamps to [orig.refIn, orig.refOut] and
+// can never make the clip shorter than MIN_LEN.
+function applyLiveDrag(drag, tm) {
+  const c = State.liveClips[drag.i];
+  tm = +tm.toFixed(3);
+  if (drag.edge === 'in') {
+    c.refIn = Math.max(c.orig.refIn, Math.min(tm, c.refOut - MIN_LEN));
+  } else {
+    c.refOut = Math.min(c.orig.refOut, Math.max(tm, c.refIn + MIN_LEN));
+  }
+  seekAll(drag.edge === 'in' ? c.refIn : c.refOut);   // playhead follows the edge
+  updateLiveInfo();
+  markFullDirty();
+}
+
+// Cut the 5D 2 clip under the playhead into two, leaving a `gap`-second hole
+// (the stationary cameras fill it). Both halves share the clip's envelope so
+// each can still be re-extended up to the original footage — but not into the
+// gap or past the other half. Returns true if a cut was made.
+const LIVE_CUT_GAP = 1.0;    // seconds skipped at the cut
+function cutLiveAt(t) {
+  const idx = State.liveClips.findIndex(c => t > c.refIn + MIN_LEN && t < c.refOut - MIN_LEN);
+  if (idx < 0) return false;
+  const c = State.liveClips[idx];
+  const half = LIVE_CUT_GAP / 2;
+  if (t - half - c.refIn < MIN_LEN || c.refOut - (t + half) < MIN_LEN) return false;
+  pushUndoLive();
+  const nextI = Math.max(0, ...State.liveClips.map(x => x.i)) + 1;
+  const right = { ...c, i: nextI, refIn: +(t + half).toFixed(3), orig: { ...c.orig } };
+  c.refOut = +(t - half).toFixed(3);
+  State.liveClips.splice(idx + 1, 0, right);
+  State.selectedLive = idx;    // keep the left half selected
+  markFullDirty(); updateLiveInfo(); saveLiveClips();
+  return true;
+}
+
+// Reset the selected live clip back to its full matched extent (undo trims).
+function extendLiveFull() {
+  const c = State.liveClips[State.selectedLive];
+  if (!c) return;
+  pushUndoLive();
+  c.refIn = c.orig.refIn; c.refOut = c.orig.refOut;
+  markFullDirty(); updateLiveInfo(); saveLiveClips();
+}
+
+// Delete the selected live clip entirely (drop 5D 2 coverage for its span).
+function deleteLive() {
+  const i = State.selectedLive;
+  if (i < 0 || i >= State.liveClips.length) return;
+  pushUndoLive();
+  State.liveClips.splice(i, 1);
+  State.selectedLive = -1;
+  markFullDirty(); updateLiveInfo(); saveLiveClips();
+}
+
+// Undo just for live-clip edits — snapshot the whole list (cheap, ~31 items).
+function pushUndoLive() {
+  State.undoStack.push({ liveClips: State.liveClips.map(c => ({ ...c, orig: { ...c.orig } })) });
+  if (State.undoStack.length > 100) State.undoStack.shift();
+  updateUndoBtn();
+}
+
+// Debounced save of the live-camera map to sync.json (separate file from
+// markers, so it has its own persistence path).
+let _liveSaveTimer = null;
+function saveLiveClips() {
+  clearTimeout(_liveSaveTimer);
+  _liveSaveTimer = setTimeout(async () => {
+    const s = $('#status');
+    try {
+      const res = await fetch('/api/live-clips', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clips: liveClipsPayload() }),
+      }).then(r => r.json());
+      if (res.ok) {
+        const sel = State.selectedLive >= 0 ? State.liveClips[State.selectedLive] : null;
+        State.liveClips = res.clips.map(toLiveClip);
+        if (sel) State.selectedLive = State.liveClips.findIndex(c => c.i === sel.i);
+        s.textContent = `✓ saved 5D 2 map (${res.clips.length} clips)`;
+        s.classList.add('flash'); setTimeout(() => s.classList.remove('flash'), 600);
+        markFullDirty(); updateLiveInfo();
+      } else {
+        s.textContent = `⚠ 5D 2 save failed (${res.error || 'unknown'})`;
+      }
+    } catch (err) {
+      s.textContent = `⚠ 5D 2 save failed (${err})`;
+    }
+  }, 500);
+}
+
 // Live-adjust a region edge while dragging its handle (perf or title).
 function applyHandleDrag(drag, tm) {
   const arr = drag.kind === 'title' ? State.titles : State.perfs;
@@ -1106,6 +1283,18 @@ function wireTimelineInput() {
       drag = { kind: 'titlemove', i: ti, grab: xToTime(x), in0: tt.in, out0: tt.out, dupPending: e.altKey };
       dragSnapped = false;
       selectTitle(ti, { seek: false });
+      return;
+    }
+    const lh = liveHandleHit(x, y);                 // 5D 2 clip edge -> trim its duration
+    if (lh) {
+      drag = { kind: 'live', ...lh }; dragSnapped = false;
+      selectLive(lh.i);
+      return;
+    }
+    const li = liveHit(x, y);                        // 5D 2 clip body -> select (cut/extend/delete)
+    if (li >= 0) {
+      selectLive(li);
+      scrubbing = true; seekAll(xToTime(x));         // still scrubs the playhead
       return;
     }
     const h = handleHit(x, y);
@@ -1477,6 +1666,24 @@ function wireThumbs() {
 // render and the thumbnails (server merges it onto render.py's defaults).
 const Color = { spec: null, values: {} };   // spec from API; values = working edit
 
+// Fetch the active per-camera grade (saved override merged onto defaults) into
+// State.camGrades and refresh the pane filters. Called at boot and after a save.
+async function loadCamGrades() {
+  let spec;
+  try { spec = await fetch('/api/camera-grades').then(r => r.json()); }
+  catch { return; }
+  Color.spec = spec;                      // cache so the modal can reuse it
+  const eff = {};
+  for (const cam of spec.cameras) {
+    const d = spec.defaults[cam.id] || {};
+    const g = (spec.grades || {})[cam.id] || {};
+    eff[cam.id] = {};
+    for (const k of spec.keys) eff[cam.id][k] = (k in g ? g[k] : d[k]);
+  }
+  State.camGrades = eff;
+  applyCameraFilters();
+}
+
 async function openColorModal() {
   const modal = $('#colorModal');
   modal.hidden = false;
@@ -1558,6 +1765,13 @@ function setGrade(camId, key, raw) {
     row.querySelector('.grade-num').value = fmtGrade(v);
   }
   updateCamModified(camId);
+  colorLivePreview();
+}
+
+// Push the modal's working values onto the camera panes so the preview updates
+// as you drag — WYSIWYG before you even save.
+function colorLivePreview() {
+  applyCameraFilters(Color.values);
 }
 
 function resetCam(camId) {
@@ -1572,6 +1786,7 @@ function resetCam(camId) {
     row.querySelector('.grade-num').value = fmtGrade(Color.values[camId][k]);
   });
   updateCamModified(camId);
+  colorLivePreview();
 }
 
 // Build the save payload: only cameras whose values differ from default (so the
@@ -1597,7 +1812,8 @@ async function saveColor() {
     }).then(r => r.json());
     if (!res.ok) throw new Error(res.error || 'save failed');
     Color.spec.grades = res.grades || {};
-    setColorStatus('✓ saved · regenerate thumbnails to preview');
+    await loadCamGrades();          // refresh State.camGrades + pane filters
+    setColorStatus('✓ saved · applied to preview & render');
     flashStatus('✓ camera color saved');
   } catch (e) {
     setColorStatus('⚠ ' + String(e));
@@ -1606,7 +1822,8 @@ async function saveColor() {
 
 function wireColor() {
   const modal = $('#colorModal');
-  const close = () => { modal.hidden = true; };
+  // Closing without saving reverts the live preview to the last saved grade.
+  const close = () => { modal.hidden = true; applyCameraFilters(); };
   $('#colorBtn').onclick = openColorModal;
   $('#colorClose').onclick = close;
   $('#colorSave').onclick = saveColor;
