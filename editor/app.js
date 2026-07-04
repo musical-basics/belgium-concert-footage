@@ -1387,13 +1387,29 @@ function renderThumbsGrid(thumbs) {
   thumbs.forEach((th) => {
     const fig = document.createElement('figure');
     fig.className = 'thumb';
+    const viewer = `/thumb-view?url=${encodeURIComponent(th.url)}`;
     fig.innerHTML = `
-      <a href="${th.url}" target="_blank" rel="noopener">
+      <a href="${viewer}" target="_blank" rel="noopener">
         <img src="${th.url}" loading="lazy" alt="${escapeHtml(th.camera_label || '')} @ ${fmtTC(th.t)}" />
       </a>
-      <figcaption>${escapeHtml(th.camera_label || th.camera)} · ${fmtTC(th.t)}</figcaption>`;
+      <figcaption>${escapeHtml(th.camera_label || th.camera)} · ${fmtTC(th.t)}</figcaption>
+      <button class="small reveal-btn" data-url="${th.url}" title="Reveal this file in Finder">📂 Show in Finder</button>`;
     grid.appendChild(fig);
   });
+}
+
+// Reveal a thumbnail in Finder via the server (open -R). Shared by the gallery
+// buttons and the standalone image page.
+async function revealThumb(url) {
+  try {
+    const res = await fetch('/api/reveal', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    }).then(r => r.json());
+    if (!res.ok) flashStatus('⚠ ' + (res.error || 'could not reveal'));
+  } catch (err) {
+    flashStatus('⚠ ' + String(err));
+  }
 }
 
 function wireThumbs() {
@@ -1405,6 +1421,11 @@ function wireThumbs() {
   };
   $('#thumbsClose').onclick = close;
   modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  // "Show in Finder" on any thumbnail (delegated — grid is re-rendered on poll).
+  $('#thumbsGrid').addEventListener('click', (e) => {
+    const btn = e.target.closest('.reveal-btn');
+    if (btn) { e.preventDefault(); revealThumb(btn.dataset.url); }
+  });
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !modal.hidden) close();
   });

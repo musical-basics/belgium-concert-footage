@@ -13,6 +13,7 @@ Run:  python3 editor/server.py   then open http://localhost:8000
 No third-party dependencies.
 """
 import hmac
+import html
 import json
 import os
 import re
@@ -798,6 +799,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/" or path == "":
             return self._serve_file(os.path.join(EDITOR_DIR, "index.html"))
+        if path == "/thumb-view":
+            # Standalone image page: full-size thumbnail + a "Show in Finder"
+            # button. Static shell (like the editor); the <img> and the reveal
+            # call authorize via the same cookie the gallery uses.
+            return self._serve_thumb_view()
         if path == "/api/meta":
             return self._send_json(self._meta())
         if path == "/api/markers":
@@ -943,6 +949,27 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 500)
             return self._send_json({"ok": True})
+        if path == "/api/reveal":
+            # Reveal a generated thumbnail in Finder (open -R). Takes the same
+            # "/thumbs/NN/KK.jpg" url the gallery serves; restricted to THUMBS_DIR
+            # with the same traversal guard as the file route.
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                url = str(json.loads(raw.decode("utf-8")).get("url", ""))
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            if not url.startswith("/thumbs/"):
+                return self._send_json({"ok": False, "error": "not a thumbnail"}, 400)
+            rel = os.path.normpath(urllib.parse.unquote(url[len("/thumbs/"):])).lstrip("/")
+            target = os.path.normpath(os.path.join(THUMBS_DIR, rel))
+            if not target.startswith(THUMBS_DIR + os.sep) or not os.path.isfile(target):
+                return self._send_json({"ok": False, "error": "no such file"}, 404)
+            try:
+                subprocess.Popen(["open", "-R", target])
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+            return self._send_json({"ok": True})
         self.send_error(404, "Not found")
 
     def do_DELETE(self):
@@ -992,6 +1019,74 @@ class Handler(BaseHTTPRequestHandler):
 
     def _load_markers(self):
         return db_load()
+
+    def _serve_thumb_view(self):
+        """Standalone page for one thumbnail: the image full-size plus a
+        'Show in Finder' button (which POSTs the url to /api/reveal)."""
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        url = (q.get("url", [""])[0] or "").strip()
+        # Only allow our own thumbnail urls; anything else -> a plain message.
+        safe = url.startswith("/thumbs/") and not (".." in url)
+        img_url = url if safe else ""
+        name = url.rsplit("/", 1)[-1] if safe else ""
+        # Escape for safe embedding in HTML/JS string contexts.
+        u_html = html.escape(img_url, quote=True)
+        # Valid JS string literal; also break any "</script>" so it can't close
+        # the inline <script> block early (json.dumps escapes quotes, not "</").
+        u_js = json.dumps(img_url).replace("</", "<\\/")
+        n_html = html.escape(name, quote=True)
+        body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{n_html or 'Thumbnail'}</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ margin: 0; background: #0b0d12; color: #e6e8ee;
+    font: 13px/1.5 -apple-system, system-ui, sans-serif;
+    display: flex; flex-direction: column; min-height: 100vh; }}
+  header {{ display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    border-bottom: 1px solid #262b36; background: #12151c; }}
+  header .name {{ font-weight: 600; }}
+  header .spacer {{ flex: 1; }}
+  button {{ font: inherit; color: #e6e8ee; background: #1b1f28;
+    border: 1px solid #3a4150; border-radius: 7px; padding: 6px 12px; cursor: pointer; }}
+  button:hover {{ border-color: #60a5fa; }}
+  #status {{ color: #8b93a3; font-size: 12px; }}
+  main {{ flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; }}
+  img {{ max-width: 100%; max-height: 88vh; border: 1px solid #262b36; border-radius: 8px; }}
+  .empty {{ color: #8b93a3; padding: 40px; text-align: center; }}
+</style></head>
+<body>
+<header>
+  <span class="name">{n_html or 'Thumbnail'}</span>
+  <span id="status"></span>
+  <span class="spacer"></span>
+  <button id="reveal"{'' if safe else ' disabled'}>📂 Show in Finder</button>
+</header>
+<main>
+  {f'<img src="{u_html}" alt="{n_html}" />' if safe else '<div class="empty">No thumbnail specified.</div>'}
+</main>
+<script>
+const URL_ = {u_js};
+const st = document.getElementById('status');
+const btn = document.getElementById('reveal');
+if (btn) btn.onclick = async () => {{
+  try {{
+    const r = await fetch('/api/reveal', {{ method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ url: URL_ }}) }}).then(r => r.json());
+    st.textContent = r.ok ? '✓ revealed in Finder' : ('⚠ ' + (r.error || 'failed'));
+  }} catch (e) {{ st.textContent = '⚠ ' + e; }}
+}};
+</script>
+</body></html>"""
+        data = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
 
 def main():
