@@ -35,7 +35,7 @@ OUT_DIR = os.path.join(ROOT, "output")
 SEG_DIR = os.path.join(ROOT, "cache", "segments")
 
 SOURCES = {
-    "back": "Main Footage/Back Camera.mov",
+    "back": "Main Footage/back camera v2.mov",
     "livestream": "Main Footage/Livestream Footage.mov",
     "piano": "Main Footage/camera next to piano.mov",
     "5d2": "5D 2.mp4",   # roving live camera; timeline mapping via SYNC_JSON
