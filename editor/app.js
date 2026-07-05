@@ -245,6 +245,13 @@ function buildVideos() {
       track.appendChild(ld);
     }
     track.appendChild(v);
+    // Ground-truth graded still, shown over the video ONLY when paused: a real
+    // ffmpeg-graded frame (exact export match) that overrides the approximate
+    // live CSS/SVG filter. Sits on top; hidden during playback/seek.
+    const still = document.createElement('img');
+    still.className = 'grade-still';
+    still.hidden = true;
+    track.appendChild(still);
     if (c.live) {
       const badge = document.createElement('div');
       badge.className = 'nolive';
@@ -256,6 +263,7 @@ function buildVideos() {
     }
     wrap.appendChild(track);
     State.videos.push(v);
+    v._gradeStill = still;             // remember this pane's overlay img
     if (c.is_audio) State.master = v;
   });
   if (!State.master) State.master = State.videos[0];
@@ -373,6 +381,54 @@ function applyCameraFilters(override) {
     const g = (override && override[c.id]) || State.camGrades[c.id];
     const id = ensureGradeFilter(g);
     v.style.filter = id ? `url(#${id})` : 'none';
+  });
+  // A live edit invalidates any shown ground-truth stills; refresh them.
+  if (!State.playing) scheduleGradeStills();
+}
+
+// ---- ground-truth graded stills (exact export match, only when paused) --
+// The browser filter can't reproduce ffmpeg's gamma exactly, so when paused we
+// fetch a REAL ffmpeg-graded frame per pane (/api/grade-frame) and lay it over
+// the <video>. That overlay IS the export, pixel-for-pixel. During playback/seek
+// we hide the stills and fall back to the fast (approximate) live filter.
+let _gradeStillTimer = null;
+let _gradeStillToken = 0;      // bumps to cancel in-flight fetches
+
+function hideGradeStills() {
+  _gradeStillToken++;          // abandon any pending refresh
+  State.videos.forEach(v => { if (v && v._gradeStill) v._gradeStill.hidden = true; });
+}
+
+// Debounced: after the playhead settles (paused), load each pane's exact frame.
+function scheduleGradeStills() {
+  if (_gradeStillTimer) clearTimeout(_gradeStillTimer);
+  hideGradeStills();                       // show live video until the still lands
+  if (State.playing) return;
+  _gradeStillTimer = setTimeout(refreshGradeStills, 180);
+}
+
+async function refreshGradeStills() {
+  _gradeStillTimer = null;
+  if (State.playing) return;
+  const t = State.master ? State.master.currentTime : 0;
+  const token = ++_gradeStillToken;
+  const w = Math.min(1280, Math.max(320, Math.round((State.videos[0]?.clientWidth || 640) * (window.devicePixelRatio || 1))));
+  State.clips.forEach((c, i) => {
+    const v = State.videos[i];
+    if (!v || !v._gradeStill) return;
+    const img = v._gradeStill;
+    const url = `/api/grade-frame?cam=${encodeURIComponent(c.id)}&t=${t.toFixed(3)}&w=${w}`;
+    const probe = new Image();
+    probe.onload = () => {
+      if (token !== _gradeStillToken || State.playing) return;   // stale/resumed
+      img.src = probe.src;
+      img.hidden = false;
+    };
+    probe.onerror = () => {                 // e.g. 5D 2 with no coverage here
+      if (token !== _gradeStillToken) return;
+      img.hidden = true;
+    };
+    probe.src = url;
   });
 }
 
@@ -507,6 +563,7 @@ function seekAll(t, force = false) {
     }
     v.currentTime = t;
   });
+  if (!State.playing) scheduleGradeStills();   // refresh exact stills at new pos
 }
 
 function syncFollowers() {
@@ -541,6 +598,7 @@ function updateLivePane(t) {
 
 async function playAll() {
   State.playing = true;
+  hideGradeStills();               // live video during playback (not the still)
   $('#playBtn').textContent = '❚❚ Pause';
   const t = State.master ? State.master.currentTime : 0;
   await Promise.allSettled(State.videos.map(v => {
@@ -554,6 +612,7 @@ function pauseAll() {
   $('#playBtn').textContent = '▶︎ Play';
   State.videos.forEach(v => { if (v.src) { v.pause(); v.playbackRate = 1.0; } });
   syncFollowers();
+  scheduleGradeStills();           // paused -> show exact ffmpeg-graded frame
 }
 function togglePlay() { State.playing ? pauseAll() : playAll(); }
 

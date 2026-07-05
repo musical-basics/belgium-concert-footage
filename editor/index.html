@@ -75,10 +75,10 @@
       Per-camera color grade applied to the final render <b>and</b> the
       thumbnails. <b>Brightness</b> is exposure (0 = none), <b>Gamma</b> lifts
       midtones (1 = none), plus <b>Contrast</b> and <b>Saturation</b> (1 = none).
-      The camera panes update live as you drag — a WYSIWYG match for the render
-      (the same contrast → brightness → gamma → saturation math). Changes take
-      effect on <b>Save</b>. Each camera has its own <b>Reset</b> back to the
-      built-in default.
+      The camera panes update live as you drag (a fast approximation); when
+      paused they show the <b>exact</b> ffmpeg-graded frame — pixel-for-pixel
+      what the export produces. Changes take effect on <b>Save</b>. Each camera
+      has its own <b>Reset</b> back to the built-in default.
     </div>
     <div id="colorCams" class="color-cams"></div>
     <div class="modal-foot">
@@ -175,7 +175,8 @@
         <button id="colorInlineReset" class="small">↺ Reset all</button>
       </div>
       <p class="cardhint">Per-camera grade for the render &amp; thumbnails. Panes
-        update live as you drag — a WYSIWYG match for the render. Takes effect on
+        update live as you drag; when paused they show the <b>exact</b>
+        ffmpeg-graded frame (what the export produces). Takes effect on
         <b>Save color</b>.</p>
       <div id="colorCamsInline" class="color-cams"></div>
       <div class="modal-foot">

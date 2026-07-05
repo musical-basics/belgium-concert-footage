@@ -90,6 +90,12 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
   letter-spacing: .04em; padding: 2px 7px; border-radius: 5px;
 }
 .track video { width: 100%; height: 100%; object-fit: contain; background:#000; flex:1; min-height:0; }
+/* ground-truth graded still — overlays the video (same box/fit) when paused */
+.track .grade-still {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: contain; background: #000; z-index: 1; pointer-events: none;
+}
+.track .grade-still[hidden] { display: none; }
 .track .tlabel {
   position: absolute; top: 6px; left: 8px; z-index: 2; font-size: 11px;
   background: rgba(0,0,0,.6); padding: 2px 7px; border-radius: 5px;

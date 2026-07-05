@@ -611,6 +611,46 @@ def _extract_thumb(r, cam, src_t, dst):
         check=True)
 
 
+# ---- ground-truth graded preview frame -------------------------------
+# The pane preview uses a browser filter that can't reproduce ffmpeg's gamma
+# exactly, so a paused frame can look different from the export. This endpoint
+# returns the REAL thing: one ffmpeg-graded still at a concert time, same eq as
+# the render, so the editor can overlay a pixel-exact preview when paused.
+_GRADE_FRAME_LOCK = threading.Lock()      # serialize these light ffmpeg calls
+
+
+def _grade_frame_bytes(cam, concert_t, width):
+    """JPEG bytes of camera `cam` at concert time `concert_t`, graded with the
+    current saved eq exactly like the export, scaled to `width` px wide. For the
+    5D 2 live camera, concert time is mapped to its source time via the sync map
+    (src = ref - delta); returns None if that moment has no 5D 2 coverage."""
+    r = _render_mod()
+    r.apply_camera_grades(_camera_grades())      # honor the saved grade
+
+    src_t = concert_t
+    if cam == "5d2":
+        cov = None
+        for c in r.load_live_clips():
+            if c["ref_in"] <= concert_t < c["ref_out"]:
+                cov = c
+                break
+        if cov is None:
+            return None
+        src_t = concert_t - cov["delta"]
+
+    eq = r.eq_filter(r.CAMERA_GRADES.get(cam))
+    w = max(160, min(1920, int(width or 960)))
+    # keep aspect, even height; grade first (exactly as the render does)
+    scale = f"scale={w}:-2"
+    vf = f"{eq},{scale}" if eq else scale
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-ss", f"{max(0.0, src_t):.3f}", "-i", r.src_path(cam),
+         "-frames:v", "1", "-vf", vf, "-f", "mjpeg", "-q:v", "3", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return proc.stdout or None
+
+
 def _thumbs_worker(index, perf):
     info = _THUMBS[index]
     try:
@@ -1005,6 +1045,30 @@ class Handler(BaseHTTPRequestHandler):
                 "defaults": camera_grade_defaults(),
                 "grades": _camera_grades(),
             })
+        if path == "/api/grade-frame":
+            # Ground-truth graded still: ?cam=ID&t=SECONDS[&w=PX]. Returns a JPEG
+            # graded by the exact export eq, for a pixel-accurate paused preview.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            cam = (q.get("cam", [""])[0] or "").strip()
+            if cam not in {c["id"] for c in CLIPS}:
+                return self._send_json({"ok": False, "error": "bad cam"}, 400)
+            try:
+                t = float(q.get("t", ["0"])[0])
+                w = int(q.get("w", ["960"])[0])
+            except (ValueError, TypeError):
+                return self._send_json({"ok": False, "error": "bad t/w"}, 400)
+            with _GRADE_FRAME_LOCK:
+                data = _grade_frame_bytes(cam, t, w)
+            if not data:
+                # no coverage (5D 2 outside its clips) or extraction failed
+                return self.send_error(404, "no frame")
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if path == "/api/exports":
             return self._send_json({"exports": exports_status(),
                                     "files": output_file_map()})
