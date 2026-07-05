@@ -345,6 +345,24 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 }
 .modal-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 
+/* --- style regions (applause / highlight, for the Short) --- */
+button.region-btn.applause { border-color: var(--warn); color: var(--warn); }
+button.region-btn.applause:hover { background: rgba(245,158,11,0.12); }
+button.region-btn.highlight { border-color: #22d3ee; color: #22d3ee; }
+button.region-btn.highlight:hover { background: rgba(34,211,238,0.12); }
+#perfList li { flex-wrap: wrap; }               /* room for region lines below */
+.reglines { flex-basis: 100%; display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+.regline {
+  display: flex; align-items: center; gap: 8px; font-size: 11px;
+  padding: 2px 6px; border-radius: 5px; border: 1px solid transparent;
+}
+.regline.applause { color: var(--warn); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.07); }
+.regline.highlight { color: #22d3ee; border-color: rgba(34,211,238,0.35); background: rgba(34,211,238,0.07); }
+.regline .regtime { color: var(--muted); font-variant-numeric: tabular-nums; }
+.regline .regrank { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+.regline .regrank input { width: 52px; padding: 1px 4px; font-size: 11px; }
+.regline .regdel { margin-left: auto; padding: 0 5px; font-size: 10px; }
+
 #help { padding: 6px 14px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); background: var(--panel); }
 #help b { color: var(--text); }
 .flash { animation: flash .5s; }

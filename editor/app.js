@@ -37,6 +37,7 @@ const State = {
   plans: [],           // rendered cut plans: [{in,out,segments:[{start,end,camera}]}]
   activeCam: null,     // camera id shown at the current playhead (per the plan)
   titles: [],          // on-screen text overlays {text, subtitle, in, out, x, y, scale}
+  regions: [],         // style regions {kind, perf, in, out, rank, cam} — applause/highlight for the Short
   selectedTitle: -1,
   selectedLive: -1,    // index of the selected 5D 2 live clip (for trim/cut)
   titleScale: 1,       // global title font multiplier (project-wide)
@@ -111,6 +112,7 @@ async function boot() {
   $('#seedInput').value = State.seed;
   State.perfs = (m && m.performances) ? m.performances.slice() : [];
   State.titles = (m && m.titles) ? m.titles.slice() : [];
+  State.regions = (m && m.regions) ? m.regions.slice() : [];
   State.titleScale = (m && m.title_scale) || 1;
   renderPerfs();
   renderTitles();
@@ -127,6 +129,7 @@ async function boot() {
   wireThumbs();
   wireColor();
   wireRestart();
+  wireRegions();
   wireLive();
   wireKeys();
   pollExports();           // pick up any export already running
@@ -1088,6 +1091,14 @@ function rebuildOverviewStatic() {
     ctx.fillStyle = c.black ? 'rgba(74,96,118,0.8)' : 'rgba(127,178,230,0.9)';
     ctx.fillRect(x0, t.oh - 3, Math.max(2, x1 - x0), 3);
   });
+  // style regions (applause/highlight): colored marks just above the 5D2 strip
+  (State.regions || []).forEach((r) => {
+    const st = REGION_STYLE[r.kind];
+    if (!st) return;
+    const x0 = r.in / State.duration * t.ow, x1 = r.out / State.duration * t.ow;
+    ctx.fillStyle = st.line;
+    ctx.fillRect(x0, t.oh - 7, Math.max(2, x1 - x0), 3);
+  });
 }
 
 function rebuildStatic() {
@@ -1176,6 +1187,26 @@ function rebuildStatic() {
     ctx.beginPath(); ctx.rect(x0 + hw + 2, PERF_Y0, Math.max(0, x1 - x0 - 2 * hw - 4), ph); ctx.clip();
     ctx.fillText(`${i + 1}. ${p.title}`, x0 + hw + 4, PERF_Y0 + 12);
     ctx.restore();
+  });
+
+  // style regions (applause amber / highlight cyan) — a band along the bottom
+  // of the performance lane so they read as their own layer, never a block.
+  const RB_H = 12;
+  (State.regions || []).forEach((r) => {
+    const st = REGION_STYLE[r.kind];
+    if (!st) return;
+    const x0 = timeToX(r.in), x1 = timeToX(r.out);
+    if (x1 < 0 || x0 > t.w) return;
+    ctx.fillStyle = st.fill;
+    ctx.fillRect(x0, t.h - RB_H, Math.max(2, x1 - x0), RB_H);
+    ctx.strokeStyle = st.line; ctx.lineWidth = 1;
+    ctx.strokeRect(x0 + 0.5, t.h - RB_H + 0.5, Math.max(2, x1 - x0) - 1, RB_H - 1);
+    if (x1 - x0 > 26) {
+      ctx.fillStyle = st.line;
+      const tag = r.kind === 'applause'
+        ? `👏${r.rank != null ? ' ' + r.rank : ''}` : '✦';
+      ctx.fillText(tag, x0 + 3, t.h - 2.5);
+    }
   });
 
   // title lane (text overlays) — the purple band above the performance blocks
@@ -1613,6 +1644,8 @@ function renderPerfs() {
     li.querySelector('[data-act=del]').onclick = (e) => {
       e.stopPropagation(); deletePerf(i);
     };
+    const rl = regionLinesFor(i);   // applause/highlight spans + rank (Short)
+    if (rl) li.appendChild(rl);
     ol.appendChild(li);
   });
   updateExportRows();
@@ -2173,6 +2206,147 @@ function wireTabs() {
   if (want === 'color') show('color');
 }
 
+/* ----------------------------------------------- style regions + the Short */
+// Regions are extra timeline spans consumed by video *styles* beyond the main
+// highlights render (see render/style_applause_ranker.py + ARCHITECTURE.md):
+//   applause  (amber) — the crowd reaction after a piece; carries a 1-10 rank
+//   highlight (cyan)  — the 3-5s showcase moment of the piece
+// They live in State.regions, save with the markers, and draw in their own
+// colors so they never collide with the performance/title/5D2 lanes.
+const REGION_STYLE = {
+  applause:  { fill: 'rgba(245,158,11,0.35)', line: '#f59e0b', tag: '👏' },
+  highlight: { fill: 'rgba(34,211,238,0.35)', line: '#22d3ee', tag: '✦' },
+};
+
+// Performance a region belongs to: the last one starting at/before the range's
+// midpoint (applause happens *after* a piece's out point, so containment fails).
+function perfForRange(tin, tout) {
+  const mid = (tin + tout) / 2;
+  let best = -1;
+  State.perfs.forEach((p, i) => { if (p.in <= mid) best = i; });
+  return best >= 0 ? best : null;
+}
+
+function addRegion(kind) {
+  const tin = State.pendingIn ?? parseFloat($('#fIn').value);
+  const tout = State.pendingOut ?? parseFloat($('#fOut').value);
+  if (!isFinite(tin) || !isFinite(tout) || tout <= tin) {
+    alert(`Set In/Out first (Mark In / Mark Out), then click ${kind}.`);
+    return;
+  }
+  const perf = perfForRange(tin, tout);
+  pushUndo();
+  State.regions.push({ kind, perf, in: +tin.toFixed(3), out: +tout.toFixed(3),
+                       rank: null, cam: null });
+  State.regions.sort((a, b) => a.in - b.in);
+  State.pendingIn = State.pendingOut = null;
+  refreshPending();
+  markDirty();
+  renderPerfs(); renderBlocks();
+  flashStatus(`✓ ${kind} marked${perf != null ? ` for #${perf + 1}` : ''}` +
+              (kind === 'applause' ? ' — set its rank in the Performances list' : ''));
+}
+
+// Region lines under a performance row: time span + rank input (applause) + ✕.
+function regionLinesFor(i) {
+  const rgs = State.regions.map((r, ri) => ({ ...r, ri }))
+    .filter(r => r.perf === i && REGION_STYLE[r.kind]);
+  if (!rgs.length) return null;
+  const box = document.createElement('div');
+  box.className = 'reglines';
+  rgs.forEach(r => {
+    const st = REGION_STYLE[r.kind];
+    const line = document.createElement('div');
+    line.className = `regline ${r.kind}`;
+    line.innerHTML = `
+      <span class="regtag">${st.tag} ${r.kind}</span>
+      <span class="regtime">${fmtTC(r.in)} → ${fmtTC(r.out)}</span>
+      ${r.kind === 'applause'
+        ? `<label class="regrank">rank <input type="number" min="1" max="10" step="0.5"
+             value="${r.rank == null ? '' : r.rank}" data-ri="${r.ri}" /></label>`
+        : ''}
+      <button class="small danger regdel" data-ri="${r.ri}" title="Remove">✕</button>`;
+    box.appendChild(line);
+  });
+  // rank edits + deletes (bound per-render; the list is rebuilt on change)
+  box.querySelectorAll('.regrank input').forEach(inp => {
+    inp.onclick = (e) => e.stopPropagation();
+    inp.onchange = (e) => {
+      const r = State.regions[+inp.dataset.ri];
+      const v = parseFloat(inp.value);
+      if (r) { r.rank = isFinite(v) ? v : null; markDirty(); }
+    };
+  });
+  box.querySelectorAll('.regdel').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      pushUndo();
+      State.regions.splice(+btn.dataset.ri, 1);
+      markDirty(); renderPerfs(); renderBlocks();
+    };
+  });
+  return box;
+}
+
+// ---- 🎬 Short: export the applause-ranker style with inline progress -----
+let _shortPollTimer = null;
+
+async function exportShort() {
+  const btn = $('#shortBtn');
+  const ranked = State.regions.filter(r => r.kind === 'applause' && r.rank != null);
+  if (!ranked.length) {
+    flashStatus('⚠ mark applause regions and set their ranks first (👏 button)');
+    return;
+  }
+  if (State.dirty) await save({ auto: true });
+  btn.disabled = true; btn.textContent = '⏳ queued';
+  try {
+    const res = await fetch('/api/export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ style: 'applause_ranker' }),
+    }).then(r => r.json());
+    if (!res.ok) throw new Error(res.error || 'could not start');
+  } catch (err) {
+    flashStatus('⚠ ' + String(err));
+    btn.disabled = false; btn.textContent = '🎬 Short';
+    return;
+  }
+  pollShort();
+}
+
+async function pollShort() {
+  clearTimeout(_shortPollTimer);
+  const btn = $('#shortBtn');
+  let entry;
+  try {
+    const data = await fetch('/api/styles').then(r => r.json());
+    entry = (data.styles || []).find(s => s.id === 'applause_ranker');
+  } catch { entry = null; }
+  const job = entry && entry.job;
+  if (job && (job.status === 'queued' || job.status === 'running')) {
+    btn.disabled = true;
+    btn.textContent = job.phase === 'cutting' || job.progress ? `🎬 ${job.progress}%` : '⏳ prep';
+    _shortPollTimer = setTimeout(pollShort, 900);
+    return;
+  }
+  btn.disabled = false; btn.textContent = '🎬 Short';
+  if (job && job.status === 'done') {
+    const file = job.file || (entry && entry.output);
+    flashStatus(`✓ Short exported: ${file}`);
+    if (file) fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                   body: JSON.stringify({ file }) });
+  } else if (job && job.status === 'error') {
+    flashStatus('⚠ Short failed: ' + (job.error || 'unknown'));
+  }
+}
+
+function wireRegions() {
+  $('#addApplauseBtn').onclick = () => addRegion('applause');
+  $('#addHighlightBtn').onclick = () => addRegion('highlight');
+  $('#shortBtn').onclick = exportShort;
+  pollShort();          // pick up a style job already running on load
+}
+
 /* ----------------------------------------------------- caption transcript */
 // The transcript is produced by tools/transcribe.py in 10 chunk passes and
 // re-merged after each one, so cache/transcript.json grows while the editor is
@@ -2357,6 +2531,10 @@ async function save({ auto = false } = {}) {
       x: t.x == null ? null : t.x, y: t.y == null ? null : t.y,
       scale: t.scale == null ? null : t.scale,
     })),
+    regions: State.regions.map(r => ({
+      kind: r.kind, perf: r.perf == null ? null : r.perf, in: r.in, out: r.out,
+      rank: r.rank == null ? null : r.rank, cam: r.cam || null,
+    })),
   };
   _saveInFlight = true;
   if (!auto) { s.textContent = 'saving…'; }
@@ -2440,6 +2618,7 @@ function applyMarkers(m) {
   $('#seedInput').value = State.seed;
   State.perfs = (m && m.performances) ? m.performances.slice() : [];
   State.titles = (m && m.titles) ? m.titles.slice() : [];
+  State.regions = (m && m.regions) ? m.regions.slice() : [];
   State.titleScale = (m && m.title_scale) || 1;
   const sel = $('#audioSource');
   if (m && m.audio_source && sel && [...sel.options].some(o => o.value === m.audio_source)) {
