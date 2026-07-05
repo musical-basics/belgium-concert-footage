@@ -118,6 +118,7 @@ async function boot() {
   renderTitles();
   updateGlobalFontUI();
 
+  wireSplitters();          // restore saved panel sizes BEFORE canvases measure
   initTimeline();
   loadWaveform();
   loadTranscript();
@@ -2204,6 +2205,84 @@ function wireTabs() {
   // Deep-link: ?tab=color opens straight to the color pane.
   const want = new URLSearchParams(location.search).get('tab');
   if (want === 'color') show('color');
+}
+
+/* ------------------------------------------------------ resizable sections */
+// Drag handles between the major sections: camera panes ↕, timeline wave ↕,
+// transcript ↕, and the three bottom columns ↔. Sizes persist per browser in
+// localStorage and re-apply on boot (before the canvases measure themselves).
+const SPLIT_KEY = 'editorSplits.v1';
+const _clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function applySplits() {
+  const s = State.splits, de = document.documentElement;
+  if (s.videos) de.style.setProperty('--videos-h', `${s.videos}px`);
+  if (s.wave) de.style.setProperty('--wave-h', `${s.wave}px`);
+  if (s.tr) {
+    de.style.setProperty('--tr-h', `${s.tr}px`);
+    $('#transcriptWrap').classList.add('sized');
+  }
+  if (s.cols) {
+    de.style.setProperty('--pc1', `${s.cols[0]}fr`);
+    de.style.setProperty('--pc2', `${s.cols[1]}fr`);
+    de.style.setProperty('--pc3', `${s.cols[2]}fr`);
+  }
+}
+
+function wireSplitters() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(SPLIT_KEY) || '{}'); } catch { /* fresh */ }
+  State.splits = { cols: [1, 1.2, 1], ...saved };
+  applySplits();
+
+  document.querySelectorAll('.vsplit, .hsplit').forEach((sp) => {
+    sp.addEventListener('pointerdown', (e) => {
+      const kind = sp.dataset.split;
+      if (kind === 'transcript' && $('#transcriptWrap').classList.contains('collapsed')) return;
+      e.preventDefault();
+      sp.setPointerCapture(e.pointerId);
+      sp.classList.add('dragging');
+      const startX = e.clientX, startY = e.clientY;
+      const s0 = {
+        videos: $('#videos').getBoundingClientRect().height,
+        wave: $('#wave').getBoundingClientRect().height,
+        tr: $('#transcriptWrap').getBoundingClientRect().height,
+        panelW: $('#panel').getBoundingClientRect().width,
+        cols: [...State.splits.cols],
+      };
+      const move = (ev) => {
+        const dx = ev.clientX - startX, dy = ev.clientY - startY;
+        if (kind === 'videos') {
+          State.splits.videos = Math.round(_clampN(s0.videos + dy, 140, innerHeight * 0.72));
+        } else if (kind === 'wave') {
+          State.splits.wave = Math.round(_clampN(s0.wave + dy, 80, 420));
+        } else if (kind === 'transcript') {
+          State.splits.tr = Math.round(_clampN(s0.tr + dy, 46, innerHeight * 0.6));
+        } else if (kind === 'col1' || kind === 'col2') {
+          const total = s0.cols[0] + s0.cols[1] + s0.cols[2];
+          const min = total * 0.12;                     // no column collapses away
+          const i = kind === 'col1' ? 0 : 1;
+          let d = dx / s0.panelW * total;
+          d = _clampN(d, -(s0.cols[i] - min), s0.cols[i + 1] - min);
+          const c = [...s0.cols];
+          c[i] = +(c[i] + d).toFixed(4);
+          c[i + 1] = +(c[i + 1] - d).toFixed(4);
+          State.splits.cols = c;
+        }
+        applySplits();
+        if (kind === 'wave') resizeTimeline();          // re-init canvas backing store
+      };
+      const up = () => {
+        sp.classList.remove('dragging');
+        sp.removeEventListener('pointermove', move);
+        sp.removeEventListener('pointerup', up);
+        localStorage.setItem(SPLIT_KEY, JSON.stringify(State.splits));
+        resizeTimeline(); markFullDirty();              // settle canvases + redraw
+      };
+      sp.addEventListener('pointermove', move);
+      sp.addEventListener('pointerup', up);
+    });
+  });
 }
 
 /* ----------------------------------------------- style regions + the Short */
