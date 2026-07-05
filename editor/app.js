@@ -330,36 +330,37 @@ function ensureGradeFilter(g) {
   // Work in the source color space (not linearized) to match ffmpeg's 8-bit eq.
   filter.setAttribute('color-interpolation-filters', 'sRGB');
 
-  // Pass 1: contrast + brightness as one linear transfer per RGB channel.
-  // combined: out = contrast*in + (0.5 - 0.5*contrast + brightness)
-  const slope = contrast;
-  const intercept = 0.5 - 0.5 * contrast + b;
-  const lin = document.createElementNS(_svgNS, 'feComponentTransfer');
+  // ffmpeg eq's per-channel curve — contrast -> brightness -> gamma:
+  //   f(v) = pow(clamp((v - 0.5)*contrast + 0.5 + brightness, 0, 1), 1/gamma)
+  // CRUCIAL: eq applies that LUT to the video's LIMITED-RANGE luma bytes
+  // (16..235), not to display values (verified against ffmpeg: predictions
+  // match its output exactly only with this mapping). The browser shows video
+  // display value d for byte Y = 16 + 219*d, so the display-space curve is:
+  //   D(d) = (clamp255(255 * f((16 + 219*d)/255)) - 16) / 219
+  // Sample D into ONE lookup-table transfer (browser lerps between samples) —
+  // this is what makes playback track the export/paused-still, instead of the
+  // washed/darker drift the naive display-space curve had.
+  const N = 65;
+  const table = [];
+  for (let k = 0; k < N; k++) {
+    const d = k / (N - 1);
+    const v = (16 + 219 * d) / 255;          // byte the render's eq actually sees
+    let y = (v - 0.5) * contrast + 0.5 + b;
+    y = Math.max(0, Math.min(1, y));
+    y = Math.pow(y, 1 / gamma);
+    const out = Math.max(0, Math.min(255, 255 * y));   // byte eq writes
+    table.push(Math.max(0, Math.min(1, (out - 16) / 219)).toFixed(5));
+  }
+  const lut = document.createElementNS(_svgNS, 'feComponentTransfer');
   for (const ch of ['R', 'G', 'B']) {
     const fn = document.createElementNS(_svgNS, `feFunc${ch}`);
-    fn.setAttribute('type', 'linear');
-    fn.setAttribute('slope', slope.toFixed(5));
-    fn.setAttribute('intercept', intercept.toFixed(5));
-    lin.appendChild(fn);
+    fn.setAttribute('type', 'table');
+    fn.setAttribute('tableValues', table.join(' '));
+    lut.appendChild(fn);
   }
-  filter.appendChild(lin);
+  filter.appendChild(lut);
 
-  // Pass 2: gamma. SVG gamma transfer = amplitude*pow(C, exponent)+offset, so
-  // exponent = 1/gamma reproduces ffmpeg's pow(in, 1/gamma).
-  if (Math.abs(gamma - 1) > 1e-6) {
-    const gam = document.createElementNS(_svgNS, 'feComponentTransfer');
-    for (const ch of ['R', 'G', 'B']) {
-      const fn = document.createElementNS(_svgNS, `feFunc${ch}`);
-      fn.setAttribute('type', 'gamma');
-      fn.setAttribute('amplitude', '1');
-      fn.setAttribute('exponent', (1 / gamma).toFixed(5));
-      fn.setAttribute('offset', '0');
-      gam.appendChild(fn);
-    }
-    filter.appendChild(gam);
-  }
-
-  // Pass 3: saturation (luma-preserving), matches ffmpeg eq saturation closely.
+  // Saturation (luma-preserving), matches ffmpeg eq saturation closely.
   if (Math.abs(sat - 1) > 1e-6) {
     const cm = document.createElementNS(_svgNS, 'feColorMatrix');
     cm.setAttribute('type', 'saturate');
