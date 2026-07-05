@@ -374,11 +374,18 @@ function ensureGradeFilter(g) {
 
 // Apply the current grades (State.camGrades) to each camera pane. Pass an
 // optional {camId: grade} override map for a live modal preview without saving.
+// The effective per-camera grades are remembered so the paused ground-truth
+// stills are fetched with the SAME values (else a slider drag would be covered
+// by a still rendered from the old saved grade).
+let _effectiveGrades = {};     // camId -> grade last applied to the panes
+
 function applyCameraFilters(override) {
+  _effectiveGrades = {};
   State.clips.forEach((c, i) => {
     const v = State.videos[i];
     if (!v) return;
     const g = (override && override[c.id]) || State.camGrades[c.id];
+    _effectiveGrades[c.id] = g;
     const id = ensureGradeFilter(g);
     v.style.filter = id ? `url(#${id})` : 'none';
   });
@@ -417,7 +424,13 @@ async function refreshGradeStills() {
     const v = State.videos[i];
     if (!v || !v._gradeStill) return;
     const img = v._gradeStill;
-    const url = `/api/grade-frame?cam=${encodeURIComponent(c.id)}&t=${t.toFixed(3)}&w=${w}`;
+    // Send the grade the pane is currently previewing (may be unsaved slider
+    // values) so the exact still shows the SAME grade, not the last-saved one.
+    const g = _effectiveGrades[c.id] || State.camGrades[c.id] || {};
+    const knobs = ['brightness', 'gamma', 'contrast', 'saturation']
+      .filter(k => g[k] != null)
+      .map(k => `&${k}=${(+g[k]).toFixed(3)}`).join('');
+    const url = `/api/grade-frame?cam=${encodeURIComponent(c.id)}&t=${t.toFixed(3)}&w=${w}${knobs}`;
     const probe = new Image();
     probe.onload = () => {
       if (token !== _gradeStillToken || State.playing) return;   // stale/resumed

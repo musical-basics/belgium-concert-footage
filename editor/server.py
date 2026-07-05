@@ -619,13 +619,15 @@ def _extract_thumb(r, cam, src_t, dst):
 _GRADE_FRAME_LOCK = threading.Lock()      # serialize these light ffmpeg calls
 
 
-def _grade_frame_bytes(cam, concert_t, width):
-    """JPEG bytes of camera `cam` at concert time `concert_t`, graded with the
-    current saved eq exactly like the export, scaled to `width` px wide. For the
+def _grade_frame_bytes(cam, concert_t, width, grade_override=None):
+    """JPEG bytes of camera `cam` at concert time `concert_t`, graded exactly
+    like the export, scaled to `width` px wide. Uses the saved grade unless
+    `grade_override` (a {knob: value} dict, e.g. unsaved slider values from the
+    Color panel) is given — so a live edit previews before it's saved. For the
     5D 2 live camera, concert time is mapped to its source time via the sync map
     (src = ref - delta); returns None if that moment has no 5D 2 coverage."""
     r = _render_mod()
-    r.apply_camera_grades(_camera_grades())      # honor the saved grade
+    r.apply_camera_grades(_camera_grades())      # baseline: the saved grade
 
     src_t = concert_t
     if cam == "5d2":
@@ -638,7 +640,8 @@ def _grade_frame_bytes(cam, concert_t, width):
             return None
         src_t = concert_t - cov["delta"]
 
-    eq = r.eq_filter(r.CAMERA_GRADES.get(cam))
+    grade = grade_override if grade_override else r.CAMERA_GRADES.get(cam)
+    eq = r.eq_filter(grade)
     w = max(160, min(1920, int(width or 960)))
     # keep aspect, even height; grade first (exactly as the render does)
     scale = f"scale={w}:-2"
@@ -1048,6 +1051,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/grade-frame":
             # Ground-truth graded still: ?cam=ID&t=SECONDS[&w=PX]. Returns a JPEG
             # graded by the exact export eq, for a pixel-accurate paused preview.
+            # Optional &brightness/&gamma/&contrast/&saturation override the saved
+            # grade so unsaved Color-panel slider values preview exactly too.
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             cam = (q.get("cam", [""])[0] or "").strip()
             if cam not in {c["id"] for c in CLIPS}:
@@ -1057,8 +1062,19 @@ class Handler(BaseHTTPRequestHandler):
                 w = int(q.get("w", ["960"])[0])
             except (ValueError, TypeError):
                 return self._send_json({"ok": False, "error": "bad t/w"}, 400)
+            override = None
+            if any(k in q for k in _GRADE_KEYS):
+                override = {}
+                for k in _GRADE_KEYS:
+                    if k not in q:
+                        continue
+                    try:
+                        lo, hi = _GRADE_BOUNDS[k]
+                        override[k] = max(lo, min(hi, float(q[k][0])))
+                    except (ValueError, TypeError):
+                        pass
             with _GRADE_FRAME_LOCK:
-                data = _grade_frame_bytes(cam, t, w)
+                data = _grade_frame_bytes(cam, t, w, override)
             if not data:
                 # no coverage (5D 2 outside its clips) or extraction failed
                 return self.send_error(404, "no frame")
