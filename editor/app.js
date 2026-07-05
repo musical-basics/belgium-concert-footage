@@ -2761,8 +2761,8 @@ function wireKeys() {
         else if (State.selectedTitle >= 0) { e.preventDefault(); deleteTitle(State.selectedTitle, { confirm: false }); }
         else if (State.selected >= 0) { e.preventDefault(); deleteSelected(); }
         break;
-      case 'c': case 'C':
-        if (e.metaKey || e.ctrlKey) break;   // leave ⌘C (copy) to the browser
+      case 's': case 'S':
+        if (e.metaKey || e.ctrlKey) break;   // leave ⌘S (save) to its own handler
         if (State.selectedLive >= 0) { e.preventDefault(); cutLiveAt(playTime()); }
         break;
       case 'Escape':
