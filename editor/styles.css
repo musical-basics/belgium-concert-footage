@@ -48,7 +48,9 @@ input[type=number] { width: 110px; }
 
 main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 10px 14px; gap: 10px; }
 
-#videos { display: flex; gap: 8px; height: var(--videos-h, 38vh); min-height: 140px; position: relative; flex-shrink: 0; }
+/* preferred height is draggable (--videos-h); still shrinkable under pressure
+   so the bottom panel always keeps its guaranteed minimum */
+#videos { display: flex; gap: 8px; flex: 0 1 var(--videos-h, 38vh); min-height: 140px; position: relative; }
 
 /* --- draggable section splitters (sizes persist in localStorage) --- */
 .vsplit {
@@ -159,6 +161,7 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 
 #panel {
   flex: 1; display: grid; overflow: hidden; gap: 0;
+  min-height: 150px;   /* never collapses away — its resize handles stay grabbable */
   /* columns are draggable (hsplit dividers are the 14px tracks) */
   grid-template-columns: var(--pc1, 1fr) 14px var(--pc2, 1.2fr) 14px var(--pc3, 1fr);
 }
