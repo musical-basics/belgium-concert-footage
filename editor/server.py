@@ -50,16 +50,42 @@ PORT = int(os.environ.get("EDITOR_PORT", "8000"))
 # the login prompt can load; it holds no secrets on its own.
 AUTH_TOKEN = os.environ.get("EDITOR_TOKEN", "").strip()
 
+# Project config: cameras (id/label/source/proxy/flags), fps, duration, audio
+# bed. Lives in project.json so a fresh concert = new footage + new project.json
+# with zero code changes. Falls back to the original Belgium-concert values if
+# the file is missing/broken so the editor always boots.
+PROJECT_JSON = os.path.join(ROOT, "project.json")
+_FALLBACK_PROJECT_CFG = {
+    "name": "Belgium Concert Highlights", "fps": 60, "duration": 5764.7,
+    "cameras": [
+        {"id": "back",       "label": "Back Camera",          "proxy": "back.mp4",       "is_audio": True},
+        {"id": "livestream", "label": "Livestream Footage",   "proxy": "livestream.mp4"},
+        {"id": "piano",      "label": "Camera next to piano", "proxy": "piano.mp4"},
+        {"id": "5d2",        "label": "5D 2 (live)",          "proxy": "5d2.mp4", "live": True},
+    ],
+}
+
+
+def load_project_cfg():
+    try:
+        with open(PROJECT_JSON) as f:
+            cfg = json.load(f)
+        assert cfg.get("cameras"), "project.json needs a cameras list"
+        return cfg
+    except Exception:
+        return dict(_FALLBACK_PROJECT_CFG)
+
+
+PROJECT_CFG = load_project_cfg()
+
 # Logical clip ids -> proxy filename and display label. Order = track order.
+# (Same shape the editor always used, now sourced from project.json. The roving
+# "live" camera follows the playhead through the audio-matched sync map and the
+# renderer prioritizes it wherever it has footage — see render/plan.py.)
 CLIPS = [
-    {"id": "back",       "label": "Back Camera",         "proxy": "back.mp4",       "is_audio": True},
-    {"id": "livestream", "label": "Livestream Footage",  "proxy": "livestream.mp4", "is_audio": False},
-    {"id": "piano",      "label": "Camera next to piano","proxy": "piano.mp4",      "is_audio": False},
-    # Roving live camera. Only covers parts of the concert; the editor pane
-    # follows the playhead through the audio-matched map in editor/sync.json
-    # and the renderer prioritizes it wherever it has footage (render/plan.py).
-    {"id": "5d2",        "label": "5D 2 (live)",         "proxy": "5d2.mp4",        "is_audio": False,
-     "live": True},
+    {"id": c["id"], "label": c.get("label", c["id"]), "proxy": c.get("proxy", f"{c['id']}.mp4"),
+     "is_audio": bool(c.get("is_audio")), **({"live": True} if c.get("live") else {})}
+    for c in PROJECT_CFG["cameras"]
 ]
 
 CONTENT_TYPES = {
@@ -94,10 +120,10 @@ _DB_LOCK = threading.Lock()
 
 DEFAULT_PROJECT = {
     "seed": 42,
-    "project": "Belgium Concert Highlights",
-    "fps": 60,
-    "duration": 5764.7,
-    "audio_source": "back",
+    "project": PROJECT_CFG.get("name", "Untitled"),
+    "fps": PROJECT_CFG.get("fps", 60),
+    "duration": PROJECT_CFG.get("duration", 0),
+    "audio_source": next((c["id"] for c in CLIPS if c.get("is_audio")), CLIPS[0]["id"]),
     "title_scale": 1.0,
 }
 
@@ -1333,7 +1359,7 @@ class Handler(BaseHTTPRequestHandler):
             })
         return {
             "clips": clips,
-            "duration": meta.get("duration", 5764.7),
+            "duration": meta.get("duration", PROJECT_CFG.get("duration", 0)),
             "fps": meta.get("fps", 60),
         }
 

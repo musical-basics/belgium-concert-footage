@@ -34,12 +34,28 @@ MARKERS = os.path.join(ROOT, "markers.json")
 OUT_DIR = os.path.join(ROOT, "output")
 SEG_DIR = os.path.join(ROOT, "cache", "segments")
 
-SOURCES = {
+# Camera id -> source file, from project.json (so a fresh concert swaps footage
+# without code changes). Falls back to the original Belgium-concert paths.
+PROJECT_JSON = os.path.join(ROOT, "project.json")
+_FALLBACK_SOURCES = {
     "back": "Main Footage/back camera v3.mov",
     "livestream": "Main Footage/Livestream Footage.mov",
     "piano": "Main Footage/camera next to piano.mov",
     "5d2": "5D 2.mp4",   # roving live camera; timeline mapping via SYNC_JSON
 }
+
+
+def load_project_cfg():
+    try:
+        with open(PROJECT_JSON) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+PROJECT_CFG = load_project_cfg()
+SOURCES = ({c["id"]: c["source"] for c in PROJECT_CFG.get("cameras", []) if c.get("source")}
+           or dict(_FALLBACK_SOURCES))
 
 # Audio-matched map of the 5D 2 selects reel onto the concert timeline
 # (produced by tools/audio_sync/, see its PLAYBOOK.md). When present, any
@@ -76,9 +92,10 @@ def load_live_clips():
 # at face-value alignment (file 0:00 == concert 0:00), so each performance is
 # cut from the same [t_in, t_out] window. Cut *detection* still reads the camera
 # bed, so the visual edit is unchanged. Falls back to the camera if absent.
-AUDIO_BED = os.path.join(ROOT, "Audio Edit Belgium Concert Highlights.wav")
+AUDIO_BED = os.path.join(ROOT, PROJECT_CFG.get(
+    "audio_bed", "Audio Edit Belgium Concert Highlights.wav"))
 
-W, H, FPS = 1920, 1080, 60
+W, H, FPS = 1920, 1080, int(PROJECT_CFG.get("fps", 60))
 
 # Font used to burn in the on-screen titles (drawtext). Cross-platform: honour
 # $TITLE_FONT, else pick the first font that exists (macOS Arial, common Linux

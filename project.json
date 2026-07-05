@@ -1,0 +1,35 @@
+{
+  "name": "Belgium Concert Highlights",
+  "fps": 60,
+  "duration": 5764.7,
+  "audio_bed": "Audio Edit Belgium Concert Highlights.wav",
+  "sync_json": "editor/sync.json",
+  "cameras": [
+    {
+      "id": "back",
+      "label": "Back Camera",
+      "source": "Main Footage/back camera v3.mov",
+      "proxy": "back.mp4",
+      "is_audio": true
+    },
+    {
+      "id": "livestream",
+      "label": "Livestream Footage",
+      "source": "Main Footage/Livestream Footage.mov",
+      "proxy": "livestream.mp4"
+    },
+    {
+      "id": "piano",
+      "label": "Camera next to piano",
+      "source": "Main Footage/camera next to piano.mov",
+      "proxy": "piano.mp4"
+    },
+    {
+      "id": "5d2",
+      "label": "5D 2 (live)",
+      "source": "5D 2.mp4",
+      "proxy": "5d2.mp4",
+      "live": true
+    }
+  ]
+}
