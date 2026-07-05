@@ -523,6 +523,118 @@ def _export_worker(index):
         info["ended"] = time.time()
 
 
+# ---- video styles ------------------------------------------------------
+# A "style" is a render recipe over the same marker data. Each entry points at
+# a script whose stdout speaks the shared progress protocol ("cut seg X/Y",
+# "✓ <file>.mp4") so every style gets the editor's progress bar for free.
+# Adding a style = drop a script in render/ + one entry here (+ any new region
+# kinds it reads — see /api/regions). "highlights" is the classic landscape
+# per-performance export and keeps its dedicated per-index flow.
+STYLES = {
+    "highlights": {
+        "label": "Concert Highlights (landscape, per performance)",
+        "script": RENDER_SCRIPT,
+        "per_performance": True,
+    },
+    "applause_ranker": {
+        "label": "Applause Ranker (portrait YT Short)",
+        "script": os.path.join(ROOT, "render", "style_applause_ranker.py"),
+        "per_performance": False,
+        "output": "short_applause-ranker.mp4",
+        "needs": "ranked 'applause' regions (+ optional 'highlight' regions)",
+    },
+}
+
+_STYLE_JOBS = {}                    # style id -> job info (like _EXPORTS values)
+_STYLE_LOCK = threading.Lock()
+
+
+def _style_worker(style):
+    info = _STYLE_JOBS[style]
+    spec = STYLES[style]
+    try:
+        with _EXPORT_RUN_LOCK:              # renders are heavy; share the queue
+            info["status"] = "running"
+            info["started"] = time.time()
+            info["phase"] = "preparing"
+            info["progress"] = 0
+            proc = subprocess.Popen(
+                [sys.executable, "-u", spec["script"]],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+            last = ""
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                last = line
+                info["line"] = line
+                m = re.search(r"cut seg (\d+)/(\d+)", line)
+                if m:
+                    cur, total = int(m.group(1)), int(m.group(2))
+                    info["progress"] = round(cur / total * 100) if total else 0
+                    info["phase"] = "finishing" if cur >= total else "cutting"
+                elif "✓" in line and ".mp4" in line:
+                    fm = re.search(r"(\S+\.mp4)\s*$", line)
+                    if fm:
+                        info["file"] = os.path.basename(fm.group(1))
+                    info["progress"] = 100
+            proc.wait()
+            info["code"] = proc.returncode
+            if proc.returncode == 0:
+                info["status"] = "done"
+                info["progress"], info["phase"] = 100, "done"
+            else:
+                info["status"] = "error"
+                info["error"] = last or f"style render exited {proc.returncode}"
+    except Exception as e:
+        info["status"] = "error"
+        info["error"] = str(e)
+    finally:
+        info["ended"] = time.time()
+
+
+def start_style(style):
+    """Kick a background render of a whole-video style. Returns (started, err)."""
+    spec = STYLES.get(style)
+    if not spec or spec.get("per_performance"):
+        return False, "unknown style"
+    with _STYLE_LOCK:
+        cur = _STYLE_JOBS.get(style)
+        if cur and cur["status"] in ("queued", "running"):
+            return False, None
+        _STYLE_JOBS[style] = {"status": "queued", "requested": time.time(),
+                              "progress": 0, "phase": "queued",
+                              "file": None, "error": None, "line": ""}
+    threading.Thread(target=_style_worker, args=(style,), daemon=True).start()
+    return True, None
+
+
+def styles_status():
+    """Registry + live job state + on-disk outputs, for /api/styles."""
+    with _STYLE_LOCK:
+        jobs = {k: dict(v) for k, v in _STYLE_JOBS.items()}
+    out = []
+    for sid, spec in STYLES.items():
+        job = jobs.get(sid)
+        entry = {"id": sid, "label": spec["label"],
+                 "per_performance": bool(spec.get("per_performance")),
+                 "needs": spec.get("needs", "")}
+        if spec.get("output"):
+            path = os.path.join(OUT_DIR, spec["output"])
+            entry["output"] = spec["output"] if os.path.isfile(path) else None
+        if job:
+            start = job.get("started") or job.get("requested")
+            entry["job"] = {
+                "status": job["status"], "progress": job.get("progress", 0),
+                "phase": job.get("phase", ""), "error": job.get("error"),
+                "file": job.get("file"),
+                "elapsed": round((job.get("ended") or time.time()) - start) if start else 0,
+            }
+        out.append(entry)
+    return out
+
+
 def start_export(index):
     """Kick a background render of one performance (1-based). Returns False if
     that performance is already queued/running."""
@@ -1186,6 +1298,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/exports":
             return self._send_json({"exports": exports_status(),
                                     "files": output_file_map()})
+        if path == "/api/styles":
+            # Style registry + live job state + outputs already on disk.
+            return self._send_json({"styles": styles_status()})
         if path == "/api/plans":
             return self._send_json({"plans": render_plans()})
         if path == "/api/thumbnails":
@@ -1369,6 +1484,9 @@ class Handler(BaseHTTPRequestHandler):
             with _EXPORTS_LOCK:
                 busy = [i for i, j in _EXPORTS.items()
                         if j.get("status") in ("queued", "running")]
+            with _STYLE_LOCK:
+                busy += [s for s, j in _STYLE_JOBS.items()
+                         if j.get("status") in ("queued", "running")]
             if busy and not force:
                 return self._send_json(
                     {"ok": False, "busy": busy,
@@ -1378,11 +1496,23 @@ class Handler(BaseHTTPRequestHandler):
             _do_restart()      # shuts down + spawns replacement after we respond
             return
         if path == "/api/export":
+            # {"index": N} -> classic per-performance highlights render.
+            # {"style": "applause_ranker"} -> whole-video style render.
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b"{}"
             try:
-                index = int(json.loads(raw.decode("utf-8")).get("index"))
+                body = json.loads(raw.decode("utf-8"))
             except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            style = (body.get("style") or "").strip()
+            if style and style != "highlights":
+                started, err = start_style(style)
+                if err:
+                    return self._send_json({"ok": False, "error": err}, 400)
+                return self._send_json({"ok": True, "style": style, "started": started})
+            try:
+                index = int(body.get("index"))
+            except (TypeError, ValueError) as e:
                 return self._send_json({"ok": False, "error": str(e)}, 400)
             started = start_export(index)
             return self._send_json({"ok": True, "index": index, "started": started})
