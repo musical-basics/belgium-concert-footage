@@ -1136,6 +1136,23 @@ class Handler(BaseHTTPRequestHandler):
                 box["grades"] = grades
             db_mutate(_set)
             return self._send_json({"ok": True, "grades": box["grades"]})
+        if path == "/api/restart":
+            # Restart the server by spawning a fully-detached replacement, then
+            # exiting this process. Refuse (unless ?force) while an export is
+            # running, since the render is our child and would be killed with us.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            force = q.get("force", ["0"])[0] in ("1", "true", "yes")
+            with _EXPORTS_LOCK:
+                busy = [i for i, j in _EXPORTS.items()
+                        if j.get("status") in ("queued", "running")]
+            if busy and not force:
+                return self._send_json(
+                    {"ok": False, "busy": busy,
+                     "error": f"export(s) {busy} running — restarting would kill "
+                              f"the render. Pass force=1 to restart anyway."}, 409)
+            self._send_json({"ok": True, "restarting": True})
+            _do_restart()      # shuts down + spawns replacement after we respond
+            return
         if path == "/api/export":
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b"{}"
@@ -1312,11 +1329,102 @@ if (btn) btn.onclick = async () => {{
         self.wfile.write(data)
 
 
+# ---- self-detach + restart -------------------------------------------
+# Running the editor from a shell (nohup ... &) leaves it in that shell's process
+# group, so when the terminal closes / the job loses the foreground, macOS
+# suspends it with a terminal-stop signal (SIGTTIN/SIGTTOU) -> the server freezes
+# (state "T"), stops answering, and the UI hangs (export stuck on "PREP"). nohup
+# does NOT block those signals. Detaching into our own session does. We do it once
+# at startup so a normally-launched server can never be frozen this way.
+#
+# Guard env var so the re-exec'd child (already a session leader) doesn't loop.
+_DETACHED_ENV = "EDITOR_DETACHED"
+
+
+def detach_session():
+    """Re-exec into a new session (os.setsid) unless we're already a session
+    leader or detaching was disabled. No-op on platforms without setsid."""
+    if os.environ.get(_DETACHED_ENV) == "1":
+        return
+    if not hasattr(os, "setsid"):
+        return
+    try:
+        if os.getpid() == os.getsid(0):     # already our own session leader
+            os.environ[_DETACHED_ENV] = "1"
+            return
+    except OSError:
+        pass
+    # Fork so the child can setsid (a process group leader can't). The parent
+    # exits immediately; the child becomes the real, detached server.
+    try:
+        if os.fork() > 0:
+            os._exit(0)                     # parent leaves
+    except OSError:
+        return                              # fork failed -> run un-detached
+    os.setsid()
+    os.environ[_DETACHED_ENV] = "1"
+    # Re-exec a fresh interpreter so we start clean in the new session.
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def spawn_replacement():
+    """Start a brand-new, fully-detached server process (same interpreter,
+    script, and port). Used by /api/restart: the new process binds the port
+    once we release it. Returns the child pid."""
+    env = dict(os.environ)
+    env[_DETACHED_ENV] = "1"                # start_new_session already detaches;
+                                            # skip the in-process fork/setsid path
+    proc = subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__)],
+        cwd=ROOT, env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)            # its own session -> never frozen
+    return proc.pid
+
+
+def _do_restart():
+    """Spawn a detached replacement, then hard-exit so the OS frees the port
+    instantly (which lets the replacement's bind succeed). Run in a short-lived
+    thread so the triggering request can return first.
+
+    Note: we deliberately do NOT call httpd.shutdown()/server_close() — calling
+    shutdown() from a thread started by a request handler self-deadlocks (it
+    waits for serve_forever to stop, which waits for this handler to finish).
+    os._exit() frees the socket immediately anyway."""
+    def worker():
+        time.sleep(0.4)                     # let the /api/restart response flush
+        try:
+            spawn_replacement()             # child retries bind until we exit
+        except Exception:
+            pass
+        os._exit(0)                         # instantly frees the port
+    threading.Thread(target=worker, daemon=True).start()
+
+
+_HTTPD = {}   # holds the live server so /api/restart can shut it down
+
+
 def main():
     os.chdir(ROOT)
+    detach_session()          # never freeze from terminal-stop signals
     db_init()
-    httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"Editor running at  http://localhost:{PORT}")
+    # allow_reuse_address must be set before bind so a restart's replacement can
+    # rebind the port immediately (no TIME_WAIT stall). It's a class attr.
+    ThreadingHTTPServer.allow_reuse_address = True
+    # Retry the bind briefly: on a restart the replacement starts before the old
+    # process has fully released the port, so give it a couple seconds to free up.
+    httpd = None
+    for attempt in range(40):               # ~6s max (40 * 0.15s)
+        try:
+            httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+            break
+        except OSError:
+            time.sleep(0.15)
+    if httpd is None:                       # last try, let the error surface
+        httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    _HTTPD["srv"] = httpd
+    print(f"Editor running at  http://localhost:{PORT}  (pid {os.getpid()})")
     print(f"Markers DB:        {DB_PATH}")
     print(f"Project root:      {ROOT}")
     print("Press Ctrl+C to stop.")

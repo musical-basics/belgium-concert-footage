@@ -126,6 +126,7 @@ async function boot() {
   wireBackups();
   wireThumbs();
   wireColor();
+  wireRestart();
   wireLive();
   wireKeys();
   pollExports();           // pick up any export already running
@@ -1642,6 +1643,49 @@ function flashStatus(msg) {
   if (!s) return;
   s.textContent = msg;
   s.classList.add('flash'); setTimeout(() => s.classList.remove('flash'), 600);
+}
+
+/* --------------------------------------------------------- restart server */
+// POST /api/restart -> the server spawns a fresh detached replacement and exits.
+// We then poll until it's back up and reload the page. If an export is running
+// the server refuses (409) unless we force it (killing the render).
+async function restartServer() {
+  const btn = $('#restartBtn');
+  if (!confirm('Restart the editor server? The page will reload once it is back up.')) return;
+  btn.disabled = true; btn.textContent = '⟳ restarting…';
+  flashStatus('restarting server…');
+  let res;
+  try {
+    res = await fetch('/api/restart', { method: 'POST' }).then(r => r.json().then(j => ({ status: r.status, j })));
+  } catch {
+    res = null;   // connection may drop as the server exits — that's expected
+  }
+  // 409 = an export is running; offer to force (kills the render).
+  if (res && res.status === 409) {
+    const b = res.j.busy || [];
+    if (!confirm(`Export(s) ${b.join(', ')} still running — restarting will KILL that render. Restart anyway?`)) {
+      btn.disabled = false; btn.textContent = '⟳ Restart';
+      flashStatus('restart cancelled');
+      return;
+    }
+    try { await fetch('/api/restart?force=1', { method: 'POST' }); } catch { /* expected */ }
+  }
+  // Poll for the replacement, then reload.
+  flashStatus('waiting for server…');
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 700));
+    try {
+      const r = await fetch('/api/meta', { cache: 'no-store' });
+      if (r.ok) { flashStatus('✓ server back — reloading'); location.reload(); return; }
+    } catch { /* not up yet */ }
+  }
+  btn.disabled = false; btn.textContent = '⟳ Restart';
+  flashStatus('⚠ server did not come back — check the terminal');
+}
+
+function wireRestart() {
+  const btn = $('#restartBtn');
+  if (btn) btn.onclick = restartServer;
 }
 
 /* ------------------------------------------------ per-performance thumbnails */
