@@ -163,6 +163,23 @@ _SCHEMA = """
         y_pos    REAL,
         scale    REAL
     );
+    -- Generic timeline regions for video "styles" beyond the main highlights
+    -- render. `kind` says what a region means (e.g. 'applause' = crowd applause
+    -- for a performance, rankable; 'highlight' = the 3-5s showcase moment used
+    -- by the applause-ranker short). `perf` is the 0-based ordinal of the
+    -- performance the region belongs to (nullable for free-standing regions),
+    -- `rank` is style-specific metadata (applause: 1-10 rating), `cam` a
+    -- camera id override for renders that honor it.
+    CREATE TABLE IF NOT EXISTS regions (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        ordinal INTEGER NOT NULL,
+        kind    TEXT    NOT NULL,
+        perf    INTEGER,
+        in_s    REAL    NOT NULL,
+        out_s   REAL    NOT NULL,
+        rank    REAL,
+        cam     TEXT
+    );
     -- Each row is a full JSON snapshot of the project + all regions, taken
     -- automatically every BACKUP_EVERY writes. `day` is the local YYYY-MM-DD
     -- the snapshot was taken, used by the prune step to keep one-per-day.
@@ -260,6 +277,17 @@ def _write_titles(conn, titles):
     )
 
 
+def _write_regions(conn, regions):
+    conn.execute("DELETE FROM regions")
+    conn.executemany(
+        "INSERT INTO regions (ordinal, kind, perf, in_s, out_s, rank, cam) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(i, r.get("kind"), r.get("perf"), r.get("in"), r.get("out"),
+          r.get("rank"), r.get("cam"))
+         for i, r in enumerate(regions)],
+    )
+
+
 def _load(conn):
     """Read the full project payload (meta + performances + titles)."""
     prow = conn.execute(
@@ -288,6 +316,13 @@ def _load(conn):
          "x": r["x_pos"], "y": r["y_pos"], "scale": r["scale"]}
         for r in conn.execute(
             "SELECT text, subtitle, in_s, out_s, x_pos, y_pos, scale FROM titles ORDER BY ordinal"
+        )
+    ]
+    meta["regions"] = [
+        {"kind": r["kind"], "perf": r["perf"], "in": r["in_s"], "out": r["out_s"],
+         "rank": r["rank"], "cam": r["cam"]}
+        for r in conn.execute(
+            "SELECT kind, perf, in_s, out_s, rank, cam FROM regions ORDER BY ordinal"
         )
     ]
     return meta
@@ -852,7 +887,15 @@ def exports_status():
 def _persist(conn, data):
     """Write a full project payload into an open connection (project + regions),
     plus the periodic backup. Caller holds _DB_LOCK and the transaction."""
-    cg = data.get("camera_grades")
+    # PRESERVE-IF-ABSENT: a client that saves without a key (e.g. the v1 editor
+    # posts markers without camera_grades or regions) must not wipe that data —
+    # only an explicit value (or explicit null/[]) replaces it.
+    if "camera_grades" in data:
+        cg = data.get("camera_grades")
+        cg_json = json.dumps(cg) if cg else None
+    else:
+        row = conn.execute("SELECT camera_grades FROM project WHERE id = 1").fetchone()
+        cg_json = row["camera_grades"] if row else None
     conn.execute(
         "INSERT INTO project "
         "(id, seed, project, fps, duration, audio_source, title_scale, camera_grades) "
@@ -863,11 +906,12 @@ def _persist(conn, data):
         "title_scale=excluded.title_scale, camera_grades=excluded.camera_grades",
         (data.get("seed", 42), data.get("project"), data.get("fps"),
          data.get("duration"), data.get("audio_source"),
-         data.get("title_scale", 1.0),
-         json.dumps(cg) if cg else None),
+         data.get("title_scale", 1.0), cg_json),
     )
     _write_performances(conn, data.get("performances", []))
     _write_titles(conn, data.get("titles", []))
+    if "regions" in data:                    # absent key -> keep existing rows
+        _write_regions(conn, data.get("regions") or [])
     # Snapshot every Nth write, then trim per the retention policy. Done inside
     # the same transaction so a backup never reflects half a save.
     count = _bump_write_count(conn)
@@ -904,6 +948,31 @@ def db_mutate(fn):
             fn(data)
             _persist(conn, data)
         return _mirror_markers()
+
+
+def _clean_region(rg):
+    """Validate + normalize one region for the additive API. Requires a kind
+    and numeric in/out (out > in); perf/rank/cam optional. Raises ValueError."""
+    if not isinstance(rg, dict):
+        raise ValueError("each region must be a JSON object")
+    kind = str(rg.get("kind") or "").strip().lower()
+    if not kind:
+        raise ValueError("region needs a 'kind' (e.g. applause, highlight)")
+    try:
+        rin, rout = float(rg["in"]), float(rg["out"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("region needs numeric 'in' and 'out' (seconds)")
+    if rout <= rin:
+        raise ValueError("region 'out' must be greater than 'in'")
+    clean = {"kind": kind, "in": round(rin, 3), "out": round(rout, 3),
+             "perf": None, "rank": None, "cam": None}
+    if rg.get("perf") is not None:
+        clean["perf"] = int(rg["perf"])
+    if rg.get("rank") is not None:
+        clean["rank"] = float(rg["rank"])
+    if rg.get("cam"):
+        clean["cam"] = str(rg["cam"])
+    return clean
 
 
 def _clean_title(t):
@@ -1062,6 +1131,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/titles":
             # Agent-friendly read of just the title cards.
             return self._send_json({"titles": db_load().get("titles", [])})
+        if path == "/api/regions":
+            # Style regions (applause, highlight, …) — agent-friendly read.
+            return self._send_json({"regions": db_load().get("regions", [])})
         if path == "/api/backups":
             return self._send_json({"backups": list_backups()})
         if path == "/api/camera-grades":
@@ -1213,6 +1285,52 @@ class Handler(BaseHTTPRequestHandler):
                 box["titles"] = data["titles"]
             db_mutate(_add)
             return self._send_json({"ok": True, "added": len(clean), "titles": box["titles"]})
+        if path == "/api/regions":
+            # Additive region API: append one region (bare object) or many
+            # ({"regions":[...]}) without touching anything else.
+            try:
+                body = self._read_json()
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            incoming = body.get("regions") if isinstance(body, dict) and "regions" in body else [body]
+            try:
+                clean = [_clean_region(rg) for rg in incoming]
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            box = {}
+            def _add_rg(data):
+                data["regions"] = (data.get("regions") or []) + clean
+                data["regions"].sort(key=lambda rg: rg.get("in", 0))
+                box["regions"] = data["regions"]
+            db_mutate(_add_rg)
+            return self._send_json({"ok": True, "added": len(clean), "regions": box["regions"]})
+        if path == "/api/regions/update":
+            # Partial update of one region by 0-based index in the sorted list:
+            # {"index": N, "rank": 7} / {"in":..,"out":..} / {"cam":..} etc.
+            try:
+                body = self._read_json()
+                idx = int(body.get("index"))
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            box = {"ok": False}
+            def _upd(data):
+                regions = data.get("regions") or []
+                if not (0 <= idx < len(regions)):
+                    return
+                rg = dict(regions[idx])
+                rg.update({k: body[k] for k in ("kind", "perf", "in", "out", "rank", "cam")
+                           if k in body})
+                try:
+                    regions[idx] = _clean_region(rg)
+                except ValueError:
+                    return
+                data["regions"] = regions
+                box["ok"] = True
+                box["regions"] = regions
+            db_mutate(_upd)
+            if not box["ok"]:
+                return self._send_json({"ok": False, "error": "bad index or values"}, 400)
+            return self._send_json({"ok": True, "regions": box["regions"]})
         if path == "/api/backups/restore":
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b"{}"
@@ -1341,6 +1459,25 @@ class Handler(BaseHTTPRequestHandler):
             if not box["ok"]:
                 return self._send_json({"ok": False, "error": "index out of range"}, 404)
             return self._send_json({"ok": True, "titles": box["titles"]})
+        if path == "/api/regions":
+            # Remove one region by 0-based index (?index=N) from the sorted list.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                idx = int(q.get("index", [""])[0])
+            except (ValueError, TypeError):
+                return self._send_json({"ok": False, "error": "index (int) required"}, 400)
+            box = {"ok": False}
+            def _del_rg(data):
+                regions = data.get("regions") or []
+                if 0 <= idx < len(regions):
+                    regions.pop(idx)
+                    data["regions"] = regions
+                    box["ok"] = True
+                box["regions"] = data.get("regions", [])
+            db_mutate(_del_rg)
+            if not box["ok"]:
+                return self._send_json({"ok": False, "error": "index out of range"}, 404)
+            return self._send_json({"ok": True, "regions": box["regions"]})
         self.send_error(404, "Not found")
 
     # ---- data --------------------------------------------------------
