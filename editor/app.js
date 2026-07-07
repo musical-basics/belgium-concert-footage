@@ -751,6 +751,7 @@ function saveForm() {
     in: +tin.toFixed(3),
     out: +tout.toFixed(3),
     camera_weights: getCamWeightInputs(),
+    kenburns: getKenburnsInputs(),
   };
   pushUndo();
   if (State.selected >= 0 && State.selected < State.perfs.length) {
@@ -771,6 +772,7 @@ function clearForm(keepSel) {
   $('#fTitle').value = ''; $('#fComposer').value = '';
   $('#fIn').value = ''; $('#fOut').value = '';
   setCamWeightInputs(null);
+  setKenburnsInputs(null);
   if (!keepSel) { State.selected = -1; renderPerfs(); }
   $('#formTitle').textContent = State.selected >= 0 ? `Edit #${State.selected+1}` : 'New performance';
   $('#formDelete').hidden = State.selected < 0;
@@ -784,11 +786,14 @@ function buildCamWeightInputs() {
   if (!box) return;
   box.innerHTML = '';
   State.clips.filter(c => !c.live).forEach(c => {
-    const lbl = document.createElement('label');
-    lbl.className = 'cwcam';
-    lbl.innerHTML = `${escapeHtml(c.label)}<input type="number" min="0" max="100"
-      step="1" class="cwin" data-cam="${c.id}" placeholder="=" />`;
-    box.appendChild(lbl);
+    const wrap = document.createElement('span');
+    wrap.className = 'cwcam';
+    wrap.innerHTML = `
+      <label>${escapeHtml(c.label)}<input type="number" min="0" max="100"
+        step="1" class="cwin" data-cam="${c.id}" placeholder="=" /></label>
+      <label class="cwkb" title="Ken Burns: mild alternating zoom in/out on this camera's cuts (render only — the editor preview stays static)">
+        <input type="checkbox" class="cwkbin" data-cam="${c.id}" /> ✨ zoom</label>`;
+    box.appendChild(wrap);
   });
 }
 
@@ -797,6 +802,22 @@ function setCamWeightInputs(weights) {
     const v = weights && weights[inp.dataset.cam];
     inp.value = (v == null) ? '' : v;
   });
+}
+
+function setKenburnsInputs(list) {
+  const on = new Set(list || []);
+  document.querySelectorAll('#cwInputs .cwkbin').forEach(inp => {
+    inp.checked = on.has(inp.dataset.cam);
+  });
+}
+
+// Camera ids with Ken Burns checked, or null when none (= off).
+function getKenburnsInputs() {
+  const out = [];
+  document.querySelectorAll('#cwInputs .cwkbin').forEach(inp => {
+    if (inp.checked) out.push(inp.dataset.cam);
+  });
+  return out.length ? out : null;
 }
 
 // {cam: weight} from the form, or null when every field is blank (= equal).
@@ -820,6 +841,7 @@ function selectPerf(idx, opts = {}) {
   $('#fComposer').value = p.composer || '';
   $('#fIn').value = p.in; $('#fOut').value = p.out;
   setCamWeightInputs(p.camera_weights);
+  setKenburnsInputs(p.kenburns);
   $('#formTitle').textContent = `Edit #${idx+1}`;
   $('#formDelete').hidden = false;
   renderPerfs(); renderBlocks();
@@ -1657,6 +1679,8 @@ function renderPerfs() {
         <small>${escapeHtml(p.composer||'—')} · ${fmtTC(p.in)} → ${fmtTC(p.out)}${
           p.camera_weights
             ? ` · <span class="cwbadge" title="camera mix">🎥 ${Object.values(p.camera_weights).join('/')}</span>`
+            : ''}${(p.kenburns && p.kenburns.length)
+            ? ` · <span class="cwbadge" title="Ken Burns on: ${p.kenburns.join(', ')}">✨</span>`
             : ''}</small></span>
       <span class="dur">${fmtDur(p.out - p.in)}</span>
       <span class="rowbtns">
@@ -2646,6 +2670,7 @@ async function save({ auto = false } = {}) {
     performances: State.perfs.map(p => ({
       title: p.title, composer: p.composer, in: p.in, out: p.out,
       camera_weights: p.camera_weights || null,
+      kenburns: p.kenburns || null,
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,
@@ -2841,6 +2866,7 @@ window.addEventListener('beforeunload', (e) => {
     performances: State.perfs.map(p => ({
       title: p.title, composer: p.composer, in: p.in, out: p.out,
       camera_weights: p.camera_weights || null,
+      kenburns: p.kenburns || null,
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,

@@ -247,6 +247,31 @@ def vf_for(cam):
     return f"{eq},{VF}" if eq else VF
 
 
+# ---- Ken Burns (mild alternating zoom on stationary cameras) -----------
+# Per-performance, per-camera toggle (markers.json performances[].kenburns =
+# ["back", "livestream", ...]). Each enabled segment gets a slow ~7% zoom —
+# direction alternates by segment index (even = push in, odd = pull out) so
+# consecutive cuts of the same camera don't repeat the same move. Rendered by
+# scaling to 2x then zoompan back to W x H: the supersampling is what keeps
+# zoompan's integer-ish sampling from visibly stepping at 1080p.
+KB_AMOUNT = 0.07
+
+
+def kb_vf_for(cam, duration, seg_index):
+    """Full -vf chain for one Ken Burns segment (grade + zoom + house format)."""
+    eq = eq_filter(CAMERA_GRADES.get(cam))
+    frames = max(int(round(duration * FPS)), 2)
+    prog = f"on/{frames - 1}"
+    z = (f"1+{KB_AMOUNT}*{prog}" if seg_index % 2 == 0
+         else f"1+{KB_AMOUNT}*(1-{prog})")
+    chain = (f"scale={W*2}:{H*2}:force_original_aspect_ratio=decrease,"
+             f"pad={W*2}:{H*2}:(ow-iw)/2:(oh-ih)/2,"
+             f"zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+             f":d=1:s={W}x{H}:fps={FPS},"
+             f"fps={FPS},format=yuv420p,setpts=PTS-STARTPTS")
+    return f"{eq},{chain}" if eq else chain
+
+
 def _fade_alpha(a, b, fd):
     """drawtext alpha expression: fade in over `fd`s after a, hold, fade out
     over `fd`s before b. `t` is the output (local) timestamp in seconds."""
@@ -373,6 +398,7 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), ti
         "performance": index + 1, "title": title, "composer": perf.get("composer", ""),
         "in": t_in, "out": t_out, "seed": seed, "audio_source": audio_cam,
         "camera_weights": perf.get("camera_weights"),
+        "kenburns": perf.get("kenburns"),
         "stats": stats, "segments": segments, "titles": perf_titles,
     }
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -395,16 +421,19 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), ti
     listfile = os.path.join(seg_dir, "concat.txt")
     enc = encoder_args(encoder)
     hw = decode_hwaccel(encoder)
+    kb_cams = set(perf.get("kenburns") or [])   # cameras with Ken Burns on
     with open(listfile, "w") as lf:
         for s in segments:
             out = os.path.join(seg_dir, f"seg_{s['index']:04d}.mp4")
             # the live camera lives on its own clock: src = concert_t - delta
             seek = s["start"] - s["delta"] if "delta" in s else s["start"]
+            vf = (kb_vf_for(s["camera"], s["duration"], s["index"])
+                  if s["camera"] in kb_cams else vf_for(s["camera"]))
             run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                  *hw,
                  "-ss", f"{seek:.3f}", "-i", src_path(s["camera"]),
                  "-t", f"{s['duration']:.3f}",
-                 "-an", "-dn", "-vf", vf_for(s["camera"]), *enc,
+                 "-an", "-dn", "-vf", vf, *enc,
                  "-r", str(FPS), "-g", str(FPS), "-write_tmcd", "0",
                  "-video_track_timescale", "60000", out])
             lf.write(f"file '{os.path.abspath(out)}'\n")

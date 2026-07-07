@@ -393,7 +393,10 @@ button.region-btn.highlight:hover { background: rgba(34,211,238,0.12); }
 #cwRow .cwlbl { color: var(--muted); font-size: 11px; align-self: center; }
 #cwInputs { display: flex; gap: 8px; flex-wrap: wrap; }
 #cwInputs .cwcam { display: flex; flex-direction: column; gap: 2px; color: var(--muted); font-size: 10px; }
+#cwInputs .cwcam > label { display: flex; flex-direction: column; gap: 2px; }
 #cwInputs .cwin { width: 64px; padding: 3px 6px; font-size: 12px; }
+#cwInputs .cwkb { display: flex; flex-direction: row; align-items: center; gap: 3px; cursor: pointer; }
+#cwInputs .cwkbin { margin: 0; }
 .cwbadge { color: var(--accent2); }
 
 #help { padding: 6px 14px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); background: var(--panel); }

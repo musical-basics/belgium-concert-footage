@@ -151,7 +151,10 @@ _SCHEMA = """
         out_s    REAL NOT NULL,
         -- optional {camera_id: relative weight} JSON steering the auto-cut's
         -- camera mix for this piece (render/plan.py); NULL = equal weights
-        camera_weights TEXT
+        camera_weights TEXT,
+        -- optional JSON list of camera ids that get a mild Ken Burns zoom on
+        -- their cuts in this piece (render.py kb_vf_for); NULL = off
+        kenburns TEXT
     );
     -- On-screen text overlays ("titles"), each shown over the final render for
     -- its [in_s, out_s] window (global concert seconds). `subtitle` is an
@@ -226,10 +229,12 @@ def db_connect():
         conn.execute("ALTER TABLE project ADD COLUMN title_scale REAL")
     if "camera_grades" not in pcols:
         conn.execute("ALTER TABLE project ADD COLUMN camera_grades TEXT")
-    # ...and per-performance camera mix weights.
+    # ...and per-performance camera mix weights + Ken Burns toggles.
     fcols = {r["name"] for r in conn.execute("PRAGMA table_info(performances)")}
     if "camera_weights" not in fcols:
         conn.execute("ALTER TABLE performances ADD COLUMN camera_weights TEXT")
+    if "kenburns" not in fcols:
+        conn.execute("ALTER TABLE performances ADD COLUMN kenburns TEXT")
     return conn
 
 
@@ -264,23 +269,29 @@ def db_init():
             )
 
 
-def _write_performances(conn, perfs):
-    # Field-level preserve-if-absent: a client that doesn't know about
-    # camera_weights (stale tab, older tool) omits the KEY entirely — inherit
-    # the stored value by ordinal so its saves can't wipe the mix. A client
-    # that knows the field sends it explicitly (null = clear).
-    prev = {r["ordinal"]: r["camera_weights"] for r in conn.execute(
-        "SELECT ordinal, camera_weights FROM performances")}
+# Per-performance JSON extras with FIELD-level preserve-if-absent: a client
+# that doesn't know a field (stale tab, older tool) omits the KEY entirely —
+# it inherits the stored value by ordinal so its saves can't wipe the data.
+# A client that knows the field sends it explicitly (null = clear).
+_PERF_JSON_FIELDS = ("camera_weights", "kenburns")
 
-    def _cw_json(i, p):
-        if "camera_weights" in p:
-            return json.dumps(p["camera_weights"]) if p.get("camera_weights") else None
-        return prev.get(i)
+
+def _write_performances(conn, perfs):
+    prev = {r["ordinal"]: r for r in conn.execute(
+        f"SELECT ordinal, {', '.join(_PERF_JSON_FIELDS)} FROM performances")}
+
+    def _field_json(i, p, field):
+        if field in p:
+            return json.dumps(p[field]) if p.get(field) else None
+        row = prev.get(i)
+        return row[field] if row else None
     conn.execute("DELETE FROM performances")
     conn.executemany(
-        "INSERT INTO performances (ordinal, title, composer, in_s, out_s, camera_weights) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        [(i, p.get("title"), p.get("composer"), p.get("in"), p.get("out"), _cw_json(i, p))
+        "INSERT INTO performances "
+        f"(ordinal, title, composer, in_s, out_s, {', '.join(_PERF_JSON_FIELDS)}) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(i, p.get("title"), p.get("composer"), p.get("in"), p.get("out"),
+          *(_field_json(i, p, f) for f in _PERF_JSON_FIELDS))
          for i, p in enumerate(perfs)],
     )
 
@@ -324,16 +335,16 @@ def _load(conn):
             meta["camera_grades"] = json.loads(cg) if isinstance(cg, str) else cg
         except (TypeError, ValueError):
             pass
-    def _cw(raw):
+    def _pj(raw):
         try:
             return json.loads(raw) if raw else None
         except (TypeError, ValueError):
             return None
     meta["performances"] = [
         {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"],
-         "camera_weights": _cw(r["camera_weights"])}
+         "camera_weights": _pj(r["camera_weights"]), "kenburns": _pj(r["kenburns"])}
         for r in conn.execute(
-            "SELECT title, composer, in_s, out_s, camera_weights "
+            "SELECT title, composer, in_s, out_s, camera_weights, kenburns "
             "FROM performances ORDER BY ordinal"
         )
     ]
