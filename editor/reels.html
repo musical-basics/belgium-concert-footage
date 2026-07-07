@@ -48,7 +48,9 @@
       </div>
       <div class="seg-actions">
         <button id="splitBtn" title="Split the compound clip at the playhead — cuts all 3 cameras + audio (S)">✂ Split at playhead</button>
+        <button id="markerBtn" class="mark" title="Drop a marker at the playhead — scrubbing and trims snap to it (M)">⚑ Add marker</button>
         <button id="deleteBtn" class="danger" disabled title="Delete the selected segment — the rest of the reel closes up (⌫)">✕ Delete segment</button>
+        <button id="deleteMarkerBtn" class="danger" hidden title="Delete the selected marker (⌫)">✕ Delete marker</button>
       </div>
       <div class="seginfo" id="segInfo">Click a segment on the timeline to select it.</div>
     </div>
@@ -88,14 +90,14 @@
     <button id="zoomOut" title="Zoom out (−)">−</button>
     <button id="zoomIn" title="Zoom in (+)">+</button>
     <span id="zoomLabel" class="zoomlabel">—</span>
-    <span class="tlhint">one compound clip — every cut hits all 3 cameras + audio · click = scrub &amp; select · drag block edges = trim (reel ripples) · <b>S</b> = split at playhead · <b>⌫</b> = delete segment · wheel = zoom</span>
+    <span class="tlhint">one compound clip — every cut hits all 3 cameras + audio · click = scrub &amp; select · drag block edges = trim (reel ripples) · <b>S</b> = split · <b>M</b> = marker (click its ⚑ to select, ⌫ deletes) · scrub &amp; trims <b>snap</b> to markers/cuts, hold <b>Shift</b> to disable · wheel = zoom</span>
     <span id="saveState" class="wavestatus"></span>
   </div>
   <canvas id="tl"></canvas>
 </section>
 
 <footer id="help">
-  <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>S</b> split · <b>⌫</b> delete segment · <b>Esc</b> deselect · <b>+ −</b> zoom · <b>0</b> fit · <b>⌘Z</b> undo
+  <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>S</b> split · <b>M</b> marker · <b>⌫</b> delete selection · <b>Esc</b> deselect · <b>+ −</b> zoom · <b>0</b> fit · <b>⌘Z</b> undo · hold <b>Shift</b> while dragging = no snap
 </footer>
 
 <script src="auth.js"></script>

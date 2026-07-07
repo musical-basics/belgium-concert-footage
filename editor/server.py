@@ -451,6 +451,7 @@ def _reels_default():
         "layout": ["livestream", "piano", "back"],
         "cams": {cid: {"scale": 1.0, "x": 0.0, "y": 0.0} for cid in _REELS_CAM_IDS},
         "segments": [{"in": 0.0, "out": round(dur, 3)}],
+        "markers": [],
     }
 
 
@@ -495,6 +496,19 @@ def clean_reels(raw):
         if so - si >= 0.05:
             segs.append({"in": round(si, 3), "out": round(so, 3)})
     doc["segments"] = segs or base["segments"]
+    marks = []
+    for m in (raw.get("markers") or [])[:500]:
+        try:
+            t = max(0.0, min(dur, float(m["t"])))
+        except (TypeError, ValueError, KeyError):
+            continue
+        entry = {"t": round(t, 3)}
+        label = str(m.get("label") or "").strip()[:80]
+        if label:
+            entry["label"] = label
+        marks.append(entry)
+    marks.sort(key=lambda m: m["t"])
+    doc["markers"] = marks
     return doc
 
 

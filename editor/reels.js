@@ -32,6 +32,7 @@ const State = {
   ph: { idx: 0, srcT: 0 },                  // playhead: segment + concert time
   playing: false,
   selected: -1,
+  selMarker: -1,
   view: { start: 0, span: 60 },             // timeline window (output time)
   wave: { ready: false, peaks: null, pps: 100 },
   undoStack: [],
@@ -89,6 +90,7 @@ async function boot() {
   State.fps = meta.fps || 60;
   State.duration = meta.duration || 0;
   State.doc = doc;
+  State.doc.markers = doc.markers || [];
   const byId = {};
   for (const c of meta.clips) byId[c.id] = c;
   State.clips = doc.layout.map(id => byId[id]).filter(Boolean);
@@ -115,8 +117,13 @@ function updateStatus() {
     `${State.clips.map(c => c.label).join(' / ')} · concert ${fmtSrc(State.duration)}`;
   $('reelMeta').textContent = `${fmtOut(outDur())} · ${n} segment${n === 1 ? '' : 's'}`;
   $('deleteBtn').disabled = !(State.selected >= 0 && n > 1);
+  const mk = State.doc.markers[State.selMarker];
+  $('deleteMarkerBtn').hidden = !mk;
   const sel = segs()[State.selected];
-  $('segInfo').innerHTML = sel
+  $('segInfo').innerHTML = mk
+    ? `Marker <b>${State.selMarker + 1}</b> ⚑ concert <b>${fmtSrc(mk.t)}</b>` +
+      (mk.label ? ` · ${mk.label}` : '') + ' · <b>⌫</b> deletes'
+    : sel
     ? `Segment <b>${State.selected + 1}/${n}</b> · concert <b>${fmtSrc(sel.in)}</b> → ` +
       `<b>${fmtSrc(sel.out)}</b> · <b>${(sel.out - sel.in).toFixed(2)}s</b>`
     : 'Click a segment on the timeline to select it.';
@@ -557,8 +564,10 @@ function tick() {
     if (State.playing) {
       // keep the playhead in view while playing
       const { start, span } = State.view;
-      if (T > start + span * 0.97 || T < start)
+      if (T > start + span * 0.97 || T < start) {
         State.view.start = clamp(T - span * 0.1, 0, Math.max(0, outDur() - span));
+        invalidate();
+      }
     }
     drawTl();
   }
@@ -573,7 +582,9 @@ function bindTransport() {
   document.querySelectorAll('[data-jump]').forEach(b =>
     b.addEventListener('click', () => seekOut(phOut() + Number(b.dataset.jump))));
   $('splitBtn').addEventListener('click', splitAtPlayhead);
+  $('markerBtn').addEventListener('click', addMarkerAtPlayhead);
   $('deleteBtn').addEventListener('click', deleteSelected);
+  $('deleteMarkerBtn').addEventListener('click', deleteSelectedMarker);
   $('undoBtn').addEventListener('click', undo);
 }
 
@@ -581,7 +592,7 @@ function bindTransport() {
 function pushUndo() {
   State.undoStack.push(JSON.stringify({
     segments: segs(), cams: State.doc.cams, layout: State.doc.layout,
-    selected: State.selected,
+    markers: State.doc.markers, selected: State.selected,
   }));
   if (State.undoStack.length > 120) State.undoStack.shift();
   State._undoTag = null;
@@ -599,8 +610,11 @@ function undo() {
   const st = JSON.parse(snap);
   State.doc.segments = st.segments;
   State.doc.cams = st.cams;
+  State.doc.markers = st.markers || [];
   State.selected = clamp(st.selected, -1, segs().length - 1);
+  State.selMarker = -1;
   State._undoTag = null;
+  invalidate();
   if (st.layout && st.layout.join() !== State.doc.layout.join()) {
     State.doc.layout = st.layout;
     applyLayoutOrder();
@@ -624,6 +638,7 @@ function splitAtPlayhead() {
     { in: Math.round(t * 1000) / 1000, out: s.out });
   State.selected = i + 1;
   State.ph.idx = i + 1;
+  invalidate();
   scheduleSave();
   updateStatus();
   drawTl();
@@ -636,6 +651,7 @@ function deleteSelected() {
   segs().splice(State.selected, 1);
   State.selected = -1;
   seekOut(T);
+  invalidate();
   scheduleSave();
   updateStatus();
   drawTl();
@@ -676,33 +692,48 @@ async function loadWaveform() {
       ready: true, peaks: new Uint8Array(buf),
       pps: meta.peaks_per_second || 100,
     };
+    invalidate();
     drawTl();
   } catch (e) { /* waveform is optional */ }
 }
-function peakMax(t0, t1) {
+/* [max, mean] of the waveform peaks in [t0,t1], each 0..1 */
+function peakStats(t0, t1) {
   const w = State.wave;
-  if (!w.ready) return 0;
+  if (!w.ready) return [0, 0];
   let i0 = Math.max(0, Math.floor(t0 * w.pps));
   const i1 = Math.min(w.peaks.length, Math.max(Math.ceil(t1 * w.pps), i0 + 1));
-  let m = 0;
-  for (; i0 < i1; i0++) if (w.peaks[i0] > m) m = w.peaks[i0];
-  return m / 255;
+  let m = 0, sum = 0, n = 0;
+  for (; i0 < i1; i0++) {
+    const p = w.peaks[i0];
+    if (p > m) m = p;
+    sum += p; n++;
+  }
+  return n ? [m / 255, sum / (n * 255)] : [0, 0];
 }
 
 /* ---------- timeline ---------- */
-const Tl = { cvs: null, ctx: null, w: 0, h: 0, drag: null };
+/* Static layer (ruler, blocks, waveform, markers, selection) is cached in an
+   offscreen canvas and only rebuilt when invalidate()d; the per-frame drawTl
+   just blits it and draws the playhead + hover cursor on top. That's what
+   makes the 1px-resolution waveform affordable at 60fps. */
+const Tl = { cvs: null, ctx: null, w: 0, h: 0, drag: null,
+             static: null, dirty: true, hoverX: null };
+
+function invalidate() { Tl.dirty = true; }
 
 function setupTimeline() {
   Tl.cvs = $('tl');
   Tl.ctx = Tl.cvs.getContext('2d');
+  Tl.static = document.createElement('canvas');
   resizeTl();
   Tl.cvs.addEventListener('mousedown', tlDown);
   window.addEventListener('mousemove', tlMove);
   window.addEventListener('mouseup', () => { Tl.drag = null; State._undoTag = null; });
+  Tl.cvs.addEventListener('mouseleave', () => { Tl.hoverX = null; });
   Tl.cvs.addEventListener('wheel', tlWheel, { passive: false });
   $('zoomFit').addEventListener('click', () => { fitView(); drawTl(); });
-  $('zoomIn').addEventListener('click', () => zoomView(1 / 1.5));
-  $('zoomOut').addEventListener('click', () => zoomView(1.5));
+  $('zoomIn').addEventListener('click', () => { zoomView(1 / 1.5); drawTl(); });
+  $('zoomOut').addEventListener('click', () => { zoomView(1.5); drawTl(); });
 }
 function resizeTl() {
   const dpr = window.devicePixelRatio || 1;
@@ -711,15 +742,93 @@ function resizeTl() {
   Tl.cvs.width = Math.round(Tl.w * dpr);
   Tl.cvs.height = Math.round(Tl.h * dpr);
   Tl.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  Tl.static.width = Tl.cvs.width;
+  Tl.static.height = Tl.cvs.height;
+  invalidate();
 }
 function fitView() {
   State.view = { start: 0, span: Math.max(1, outDur()) };
+  invalidate();
 }
 function zoomView(f, cx) {
   const v = State.view;
   const T = cx !== undefined ? xToTime(cx) : v.start + v.span / 2;
   v.span = clamp(v.span * f, 0.5, Math.max(1, outDur()));
   v.start = clamp(T - (T - v.start) * f, 0, Math.max(0, outDur() - v.span));
+  invalidate();
+}
+
+/* ---------- markers + snapping ---------- */
+/* Where each marker is visible: its concert time mapped into output time,
+   once per segment whose window contains it. */
+function markerOccurrences() {
+  const out = [];
+  let base = 0;
+  for (const s of segs()) {
+    State.doc.markers.forEach((m, mi) => {
+      if (m.t >= s.in && m.t <= s.out) out.push({ mi, T: base + (m.t - s.in) });
+    });
+    base += s.out - s.in;
+  }
+  return out;
+}
+
+const SNAP_PX = 8;
+
+/* Snap an OUTPUT time to nearby markers / cut boundaries (scrubbing). */
+function snapOut(T, disable) {
+  if (disable) return T;
+  const thr = SNAP_PX * State.view.span / Tl.w;
+  let best = null, bd = thr;
+  const consider = (t) => {
+    const dd = Math.abs(t - T);
+    if (dd < bd) { bd = dd; best = t; }
+  };
+  for (const o of markerOccurrences()) consider(o.T);
+  let a = 0;
+  for (const s of segs()) { consider(a); a += s.out - s.in; }
+  consider(a);
+  return best !== null ? best : T;
+}
+
+/* Snap a CONCERT time to nearby markers (edge trims). */
+function snapSrc(t, disable) {
+  if (disable) return t;
+  const thr = SNAP_PX * State.view.span / Tl.w;
+  let best = t, bd = thr;
+  for (const m of State.doc.markers) {
+    const dd = Math.abs(m.t - t);
+    if (dd < bd) { bd = dd; best = m.t; }
+  }
+  return best;
+}
+
+function addMarkerAtPlayhead() {
+  const t = Math.round(State.ph.srcT * 1000) / 1000;
+  if (State.doc.markers.some(m => Math.abs(m.t - t) < 0.05)) {
+    flashSave('⚠ marker already at the playhead');
+    return;
+  }
+  pushUndo();
+  State.doc.markers.push({ t });
+  State.doc.markers.sort((a, b) => a.t - b.t);
+  State.selMarker = State.doc.markers.findIndex(m => m.t === t);
+  State.selected = -1;
+  invalidate();
+  scheduleSave();
+  updateStatus();
+  drawTl();
+}
+
+function deleteSelectedMarker() {
+  if (!(State.selMarker >= 0)) return;
+  pushUndo();
+  State.doc.markers.splice(State.selMarker, 1);
+  State.selMarker = -1;
+  invalidate();
+  scheduleSave();
+  updateStatus();
+  drawTl();
 }
 const timeToX = (t) => (t - State.view.start) / State.view.span * Tl.w;
 const xToTime = (x) => State.view.start + x / Tl.w * State.view.span;
@@ -730,14 +839,17 @@ function tickStep(target) {
   return 600;
 }
 
-function drawTl() {
-  const ctx = Tl.ctx;
-  if (!ctx || !State.doc) return;
+function rebuildStatic() {
+  Tl.dirty = false;
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = Tl.static.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const W = Tl.w, H = Tl.h;
   ctx.clearRect(0, 0, W, H);
   const css = getComputedStyle(document.documentElement);
   const cAccent = css.getPropertyValue('--accent').trim() || '#4f8cff';
   const cMuted = css.getPropertyValue('--muted').trim() || '#8b93a7';
+  const cWarn = css.getPropertyValue('--warn').trim() || '#f59e0b';
   const y0 = 20, bh = H - y0 - 6;
 
   // ruler
@@ -763,15 +875,20 @@ function drawTl() {
     const bx = x0 + 1, bw = Math.max(2, x1 - x0 - 2);
     ctx.fillStyle = fills[i % 2];
     ctx.fillRect(bx, y0, bw, bh);
-    // waveform inside the block (source-time slice)
-    if (State.wave.ready && bw > 6) {
-      ctx.fillStyle = 'rgba(230,233,239,0.35)';
-      const px = Math.max(1, Math.floor(bw / 300));
-      for (let x = 0; x < bw; x += px) {
-        const t0 = s.in + (x / bw) * d, t1 = s.in + ((x + px) / bw) * d;
-        const p = peakMax(t0, t1);
-        const hh = Math.max(1, p * (bh - 14));
-        ctx.fillRect(bx + x, y0 + bh - hh, px, hh);
+    // waveform: mirrored around the block's midline, 1px columns, two-tone
+    // (dim = max peak, bright = mean) so transients stand out precisely
+    if (State.wave.ready && bw > 4) {
+      const mid = y0 + bh / 2, amp = bh / 2 - 3;
+      const xs = Math.max(0, Math.floor(-bx));            // clip to viewport
+      const xe = Math.min(bw, Math.ceil(W - bx));
+      for (let x = xs; x < xe; x++) {
+        const t0 = s.in + (x / bw) * d, t1 = s.in + ((x + 1) / bw) * d;
+        const st = peakStats(t0, t1);
+        if (!st[0]) continue;
+        ctx.fillStyle = 'rgba(160,190,255,0.30)';
+        ctx.fillRect(bx + x, mid - st[0] * amp, 1, Math.max(1, st[0] * amp * 2));
+        ctx.fillStyle = 'rgba(215,230,255,0.80)';
+        ctx.fillRect(bx + x, mid - st[1] * amp, 1, Math.max(1, st[1] * amp * 2));
       }
     }
     // border + selection
@@ -794,6 +911,51 @@ function drawTl() {
     }
     ctx.lineWidth = 1;
   });
+
+  // markers (⚑ amber; selected = white)
+  for (const o of markerOccurrences()) {
+    const x = timeToX(o.T);
+    if (x < -10 || x > W + 10) continue;
+    const sel = o.mi === State.selMarker;
+    ctx.strokeStyle = sel ? '#fff' : cWarn;
+    ctx.fillStyle = sel ? '#fff' : cWarn;
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(x, 12); ctx.lineTo(x, H); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, 12); ctx.lineTo(x + 8, 16.5); ctx.lineTo(x, 21);
+    ctx.closePath(); ctx.fill();
+    ctx.lineWidth = 1;
+  }
+}
+
+function drawTl() {
+  const ctx = Tl.ctx;
+  if (!ctx || !State.doc) return;
+  if (Tl.dirty) rebuildStatic();
+  const W = Tl.w, H = Tl.h;
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(Tl.static, 0, 0, W, H);
+
+  // hover cursor: shows exactly where a click would land (after snapping)
+  // with its precise output + concert timecodes
+  if (Tl.hoverX !== null && !Tl.drag) {
+    const T = snapOut(xToTime(Tl.hoverX), false);
+    const x = timeToX(T);
+    const snapped = Math.abs(x - Tl.hoverX) > 0.5;
+    ctx.strokeStyle = snapped ? 'rgba(245,158,11,0.9)' : 'rgba(255,255,255,0.4)';
+    ctx.beginPath(); ctx.moveTo(x, 12); ctx.lineTo(x, H); ctx.stroke();
+    const m = outToSrc(T);
+    const label = `${fmtOut(T)}  ·  concert ${fmtSrc(m.t)}`;
+    ctx.font = '11px ui-monospace, Menlo, monospace';
+    const tw = ctx.measureText(label).width;
+    const lx = clamp(x + 8, 2, W - tw - 10);
+    ctx.fillStyle = 'rgba(14,16,20,0.92)';
+    ctx.fillRect(lx - 4, 14, tw + 8, 16);
+    ctx.strokeStyle = 'rgba(42,48,64,0.9)';
+    ctx.strokeRect(lx - 3.5, 14.5, tw + 7, 15);
+    ctx.fillStyle = snapped ? '#f5c518' : '#e6e9ef';
+    ctx.fillText(label, lx, 26);
+  }
 
   // playhead
   const px = timeToX(phOut());
@@ -824,19 +986,46 @@ function hitTest(x) {
   return null;
 }
 
+/* A marker flag under the cursor (top strip of the timeline). */
+function markerHit(x, y) {
+  if (y > 24) return null;
+  let best = null, bd = 9;
+  for (const o of markerOccurrences()) {
+    const dd = Math.abs(timeToX(o.T) - x);
+    if (dd < bd) { bd = dd; best = o; }
+  }
+  return best;
+}
+
 function tlDown(e) {
   const rect = Tl.cvs.getBoundingClientRect();
-  const x = e.clientX - rect.left;
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const mk = markerHit(x, y);
+  if (mk) {
+    // select the marker and park the playhead exactly on it (S cuts there)
+    State.selMarker = mk.mi;
+    State.selected = -1;
+    seekOut(mk.T);
+    invalidate();
+    updateStatus();
+    drawTl();
+    return;
+  }
   const hit = hitTest(x);
   if (hit && hit.edge) {
     pushUndo();
     State.selected = hit.idx;
-    Tl.drag = { mode: 'trim', idx: hit.idx, edge: hit.edge, lastX: x };
+    State.selMarker = -1;
+    const s = segs()[hit.idx];
+    Tl.drag = { mode: 'trim', idx: hit.idx, edge: hit.edge, lastX: x,
+                val: hit.edge === 'in' ? s.in : s.out };
   } else {
     State.selected = hit ? hit.idx : -1;
+    State.selMarker = -1;
     Tl.drag = { mode: 'scrub' };
-    seekOut(xToTime(x));
+    seekOut(snapOut(xToTime(x), e.shiftKey));
   }
+  invalidate();
   updateStatus();
   drawTl();
 }
@@ -846,23 +1035,31 @@ function tlMove(e) {
   const x = e.clientX - rect.left;
   if (!Tl.drag) {
     if (e.target === Tl.cvs) {
+      Tl.hoverX = x;
       const hit = hitTest(x);
-      Tl.cvs.style.cursor = hit && hit.edge ? 'col-resize' : 'crosshair';
+      const mk = markerHit(x, e.clientY - rect.top);
+      Tl.cvs.style.cursor =
+        mk ? 'pointer' : hit && hit.edge ? 'col-resize' : 'crosshair';
+    } else {
+      Tl.hoverX = null;
     }
     return;
   }
   if (Tl.drag.mode === 'scrub') {
-    seekOut(xToTime(clamp(x, 0, Tl.w)));
+    seekOut(snapOut(xToTime(clamp(x, 0, Tl.w)), e.shiftKey));
     return;
   }
-  // trim: incremental so the ripple under the cursor feels natural
-  const dt = (x - Tl.drag.lastX) / Tl.w * State.view.span;
+  // trim: accumulate the drag in unsnapped space (drag.val) and snap the
+  // candidate each move — sticky near markers but still escapable
+  Tl.drag.val += (x - Tl.drag.lastX) / Tl.w * State.view.span;
   Tl.drag.lastX = x;
   const s = segs()[Tl.drag.idx];
-  if (Tl.drag.edge === 'in') s.in = clamp(s.in + dt, 0, s.out - MIN_SEG);
-  else s.out = clamp(s.out + dt, s.in + MIN_SEG, State.duration);
+  const cand = snapSrc(Tl.drag.val, e.shiftKey);
+  if (Tl.drag.edge === 'in') s.in = clamp(cand, 0, s.out - MIN_SEG);
+  else s.out = clamp(cand, s.in + MIN_SEG, State.duration);
   s.in = Math.round(s.in * 1000) / 1000;
   s.out = Math.round(s.out * 1000) / 1000;
+  invalidate();
   seekOut(phOut());
   scheduleSave();
   updateStatus();
@@ -877,6 +1074,7 @@ function tlWheel(e) {
     State.view.start = clamp(
       State.view.start + e.deltaX / Tl.w * State.view.span,
       0, Math.max(0, outDur() - State.view.span));
+    invalidate();
   }
   drawTl();
 }
@@ -901,10 +1099,16 @@ function bindKeys() {
         seekOut(phOut() + (e.shiftKey ? 5 : 1 / State.fps)); break;
       case 's': case 'S':
         splitAtPlayhead(); break;
+      case 'm': case 'M':
+        addMarkerAtPlayhead(); break;
       case 'Backspace': case 'Delete':
-        e.preventDefault(); deleteSelected(); break;
+        e.preventDefault();
+        if (State.selMarker >= 0) deleteSelectedMarker();
+        else deleteSelected();
+        break;
       case 'Escape':
-        State.selected = -1; updateStatus(); drawTl(); break;
+        State.selected = -1; State.selMarker = -1;
+        invalidate(); updateStatus(); drawTl(); break;
       case '+': case '=':
         zoomView(1 / 1.5); drawTl(); break;
       case '-': case '_':

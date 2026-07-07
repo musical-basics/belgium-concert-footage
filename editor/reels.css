@@ -74,4 +74,4 @@
 /* ---- timeline ---- */
 #timelineWrap { flex: 0 0 auto; padding: 0 14px 8px; display: flex; flex-direction: column; }
 #tlbar { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
-#tl { width: 100%; height: 150px; border-radius: 9px; background: var(--panel); display: block; }
+#tl { width: 100%; height: 176px; border-radius: 9px; background: var(--panel); display: block; }
