@@ -1076,7 +1076,7 @@ function drawTl() {
   // move-drag: insertion caret at the nearest cut + a ghost of the clip
   if (Tl.drag && Tl.drag.mode === 'move') {
     const i = Tl.drag.idx, s = segs()[i], d = s.out - s.in;
-    const k = moveTarget();
+    const k = moveTargetAt(Tl.drag.x);
     let a = 0;
     for (let j = 0; j < k; j++) a += segs()[j].out - segs()[j].in;
     const cx = timeToX(a);
@@ -1181,9 +1181,9 @@ function tlDown(e) {
   drawTl();
 }
 
-/* Cut boundary nearest the move-drag cursor = the insertion point (0..n). */
-function moveTarget() {
-  const T = xToTime(Tl.drag.x);
+/* Cut boundary nearest an output x = the insertion point (0..n). */
+function moveTargetAt(dragX) {
+  const T = xToTime(dragX);
   let a = 0, best = 0, bd = Infinity;
   for (let k = 0; k <= segs().length; k++) {
     const dd = Math.abs(T - a);
@@ -1222,7 +1222,7 @@ function tlUp() {
   Tl.drag = null;
   State._undoTag = null;
   if (d && d.mode === 'move') {
-    commitMove(d.idx, moveTarget());
+    commitMove(d.idx, moveTargetAt(d.x));
     drawTl();
   }
 }
