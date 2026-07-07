@@ -40,6 +40,7 @@ WAVE_BIN = os.path.join(ROOT, "cache", "waveform.u8")
 WAVE_META = os.path.join(ROOT, "cache", "waveform.json")
 TRANSCRIPT_PATH = os.path.join(ROOT, "cache", "transcript.json")
 SYNC_JSON = os.path.join(EDITOR_DIR, "sync.json")   # 5D 2 live-camera coverage map
+REELS_JSON = os.path.join(ROOT, "reels.json")       # reels interface cut list + framing
 
 PORT = int(os.environ.get("EDITOR_PORT", "8000"))
 
@@ -432,6 +433,81 @@ def save_live_clips(clips):
         return clean
 
 
+# ---- reels production interface (portrait 3-stack compound cut) --------
+# The reels editor (/reels.html) edits ONE document: an ordered list of
+# concert-time segments (the compound cut — trimming a segment ripples all
+# three cameras + audio together) plus a per-camera zoom/x/y framing for the
+# stacked 1080x1920 layout. Persisted to reels.json; render/style_reels.py
+# reads the same file.
+_REELS_LOCK = threading.Lock()
+_REELS_CAM_IDS = [c["id"] for c in CLIPS if not c.get("live")]
+
+
+def _reels_default():
+    dur = float(PROJECT_CFG.get("duration", 5764.7))
+    return {
+        "version": 1,
+        "width": 1080, "height": 1920,
+        "layout": ["livestream", "piano", "back"],
+        "cams": {cid: {"scale": 1.0, "x": 0.0, "y": 0.0} for cid in _REELS_CAM_IDS},
+        "segments": [{"in": 0.0, "out": round(dur, 3)}],
+    }
+
+
+def load_reels():
+    if not os.path.isfile(REELS_JSON):
+        return _reels_default()
+    try:
+        with open(REELS_JSON) as f:
+            return clean_reels(json.load(f))
+    except Exception:
+        return _reels_default()
+
+
+def clean_reels(raw):
+    """Validate/clamp a reels doc; raises ValueError on hopeless input."""
+    if not isinstance(raw, dict):
+        raise ValueError("reels doc must be an object")
+    base = _reels_default()
+    doc = dict(base)
+    dur = float(PROJECT_CFG.get("duration", 5764.7))
+    layout = [c for c in (raw.get("layout") or []) if c in _REELS_CAM_IDS]
+    doc["layout"] = layout or base["layout"]
+    cams = {}
+    for cid in _REELS_CAM_IDS:
+        t = raw.get("cams", {}).get(cid) or {}
+        try:
+            cams[cid] = {
+                "scale": max(1.0, min(4.0, float(t.get("scale", 1.0)))),
+                "x": max(-4000.0, min(4000.0, float(t.get("x", 0.0)))),
+                "y": max(-4000.0, min(4000.0, float(t.get("y", 0.0)))),
+            }
+        except (TypeError, ValueError):
+            cams[cid] = {"scale": 1.0, "x": 0.0, "y": 0.0}
+    doc["cams"] = cams
+    segs = []
+    for s in (raw.get("segments") or [])[:1000]:
+        try:
+            si = max(0.0, min(dur, float(s["in"])))
+            so = max(0.0, min(dur, float(s["out"])))
+        except (TypeError, ValueError, KeyError):
+            continue
+        if so - si >= 0.05:
+            segs.append({"in": round(si, 3), "out": round(so, 3)})
+    doc["segments"] = segs or base["segments"]
+    return doc
+
+
+def save_reels(raw):
+    doc = clean_reels(raw)
+    with _REELS_LOCK:
+        tmp = REELS_JSON + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(doc, f, indent=1)
+        os.replace(tmp, REELS_JSON)
+    return doc
+
+
 def _bump_write_count(conn):
     """Increment and return the persistent total-saves counter."""
     conn.execute(
@@ -579,6 +655,13 @@ STYLES = {
         "per_performance": False,
         "output": "short_applause-ranker.mp4",
         "needs": "ranked 'applause' regions (+ optional 'highlight' regions)",
+    },
+    "reels": {
+        "label": "Reel (portrait 3-stack, compound cut)",
+        "script": os.path.join(ROOT, "render", "style_reels.py"),
+        "per_performance": False,
+        "output": "reel_3stack.mp4",
+        "needs": "a cut list from the reels interface (/reels.html)",
     },
 }
 
@@ -1296,6 +1379,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/regions":
             # Style regions (applause, highlight, …) — agent-friendly read.
             return self._send_json({"regions": db_load().get("regions", [])})
+        if path == "/api/reels":
+            # Reels production interface document (segments + per-cam framing).
+            return self._send_json(load_reels())
         if path == "/api/backups":
             return self._send_json({"backups": list_backups()})
         if path == "/api/camera-grades":
@@ -1431,6 +1517,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 500)
             return self._send_json({"ok": True, "clips": saved, "saved": SYNC_JSON})
+        if path == "/api/reels":
+            # Full-document save from the reels interface (validated + clamped).
+            try:
+                body = self._read_json()
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            try:
+                saved = save_reels(body)
+            except ValueError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+            return self._send_json({"ok": True, "doc": saved, "saved": REELS_JSON})
         if path == "/api/titles":
             # Additive title API for the external agent: append one title (a bare
             # object) or many ({"titles":[...]}), without touching anything else.

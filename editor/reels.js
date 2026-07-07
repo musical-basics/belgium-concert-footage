@@ -1,0 +1,759 @@
+/* Reels production interface.
+ *
+ * One COMPOUND clip: an ordered list of concert-time segments played
+ * back-to-back. Every edit (split at playhead, edge trim, delete) hits all
+ * three stacked cameras and the audio together, and the reel ripples closed —
+ * there are no gaps in output time.
+ *
+ * Geometry: #stage is a real 1080x1920 div scaled down with a CSS transform,
+ * so all pane math happens in OUTPUT pixels. The per-camera framing
+ * (zoom/x/y) uses the exact same cover-fit + pan-crop formula as
+ * render/style_reels.py, so the preview is the export.
+ *
+ * Persistence: the whole document (segments + cams + layout) lives in
+ * reels.json via GET/POST /api/reels (debounced autosave).
+ */
+'use strict';
+
+const OUT_W = 1080, OUT_H = 1920;
+const SRC_W = 1920, SRC_H = 1080;          // all three stationary cameras
+const MIN_SEG = 0.1;                        // shortest segment (s)
+const EDGE_PX = 6;                          // trim-handle hit zone
+
+const State = {
+  fps: 60,
+  duration: 0,                              // concert length (s)
+  doc: null,                                // {segments, cams, layout, ...}
+  clips: [],                                // /api/meta cameras used here
+  videos: {},                               // cam id -> <video>
+  panes: {},                                // cam id -> .pane element
+  master: null,                             // back camera <video> (audio bed)
+  stageK: 1,
+  ph: { idx: 0, srcT: 0 },                  // playhead: segment + concert time
+  playing: false,
+  selected: -1,
+  view: { start: 0, span: 60 },             // timeline window (output time)
+  wave: { ready: false, peaks: null, pps: 100 },
+  undoStack: [],
+  saveTimer: null,
+  exportTimer: null,
+};
+
+const $ = (id) => document.getElementById(id);
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const api = (url, opts) => fetch(url, Object.assign({ credentials: 'same-origin' }, opts));
+
+/* ---------- time helpers ---------- */
+function segs() { return State.doc.segments; }
+function outDur() { return segs().reduce((a, s) => a + (s.out - s.in), 0); }
+function outBase(idx) {
+  let a = 0;
+  for (let i = 0; i < idx; i++) a += segs()[i].out - segs()[i].in;
+  return a;
+}
+function phOut() {
+  const s = segs()[State.ph.idx];
+  if (!s) return 0;
+  return outBase(State.ph.idx) + clamp(State.ph.srcT - s.in, 0, s.out - s.in);
+}
+function outToSrc(T) {
+  T = clamp(T, 0, Math.max(0, outDur() - 1e-4));
+  let a = 0;
+  for (let i = 0; i < segs().length; i++) {
+    const d = segs()[i].out - segs()[i].in;
+    if (T < a + d || i === segs().length - 1)
+      return { idx: i, t: segs()[i].in + clamp(T - a, 0, d) };
+    a += d;
+  }
+  return { idx: 0, t: segs()[0] ? segs()[0].in : 0 };
+}
+
+function fmtOut(t) {
+  const ms = Math.round((t % 1) * 1000);
+  const s = Math.floor(t % 60), m = Math.floor(t / 60);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+function fmtSrc(t) {
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60);
+  const s = (t % 60).toFixed(2).padStart(5, '0');
+  return `${h}:${String(m).padStart(2, '0')}:${s}`;
+}
+
+/* ---------- boot ---------- */
+async function boot() {
+  const [meta, doc] = await Promise.all([
+    api('/api/meta').then(r => r.json()),
+    api('/api/reels').then(r => r.json()),
+  ]);
+  State.fps = meta.fps || 60;
+  State.duration = meta.duration || 0;
+  State.doc = doc;
+  const byId = {};
+  for (const c of meta.clips) byId[c.id] = c;
+  State.clips = doc.layout.map(id => byId[id]).filter(Boolean);
+
+  buildStage();
+  buildCamRows();
+  layoutStage();
+  setupTimeline();
+  fitView();
+  loadWaveform();
+  bindTransport();
+  bindKeys();
+  bindExport();
+  seekOut(0);
+  updateStatus();
+  requestAnimationFrame(tick);
+  window.addEventListener('resize', () => { layoutStage(); resizeTl(); drawTl(); });
+}
+
+function updateStatus() {
+  const n = segs().length;
+  $('status').textContent =
+    `${State.clips.map(c => c.label).join(' / ')} · concert ${fmtSrc(State.duration)}`;
+  $('reelMeta').textContent = `${fmtOut(outDur())} · ${n} segment${n === 1 ? '' : 's'}`;
+  $('deleteBtn').disabled = !(State.selected >= 0 && n > 1);
+  const sel = segs()[State.selected];
+  $('segInfo').innerHTML = sel
+    ? `Segment <b>${State.selected + 1}/${n}</b> · concert <b>${fmtSrc(sel.in)}</b> → ` +
+      `<b>${fmtSrc(sel.out)}</b> · <b>${(sel.out - sel.in).toFixed(2)}s</b>`
+    : 'Click a segment on the timeline to select it.';
+  $('undoBtn').disabled = !State.undoStack.length;
+}
+
+/* ---------- stage: stacked panes + XY framing ---------- */
+function buildStage() {
+  const stage = $('stage');
+  stage.innerHTML = '';
+  const n = State.clips.length;
+  const paneH = Math.floor(OUT_H / n);
+  State.clips.forEach((c, i) => {
+    const pane = document.createElement('div');
+    pane.className = 'pane';
+    pane.dataset.cam = c.id;
+    pane.style.height = (i === n - 1 ? OUT_H - paneH * (n - 1) : paneH) + 'px';
+    const v = document.createElement('video');
+    v.src = c.proxy_url || ('/proxies/' + c.proxy);
+    v.preload = 'auto';
+    v.muted = !c.is_audio;
+    v.playsInline = true;
+    pane.appendChild(v);
+    const label = document.createElement('div');
+    label.className = 'pane-label';
+    pane.appendChild(label);
+    stage.appendChild(pane);
+    State.videos[c.id] = v;
+    State.panes[c.id] = pane;
+    if (c.is_audio) State.master = v;
+    bindPane(pane, c.id);
+    applyCam(c.id);
+  });
+  if (!State.master) State.master = State.videos[State.clips[0].id];
+}
+
+function paneSize(cam) {
+  const pane = State.panes[cam];
+  return { w: OUT_W, h: pane.clientHeight || Math.floor(OUT_H / State.clips.length) };
+}
+
+/* The one framing formula (mirrored by style_reels.py's cam_chain). */
+function applyCam(cam) {
+  const t = State.doc.cams[cam] || (State.doc.cams[cam] = { scale: 1, x: 0, y: 0 });
+  const { w: pw, h: ph } = paneSize(cam);
+  const cover = Math.max(pw / SRC_W, ph / SRC_H);
+  t.scale = clamp(t.scale, 1, 4);
+  const s = cover * t.scale;
+  const w = SRC_W * s, h = SRC_H * s;
+  const maxX = (w - pw) / 2, maxY = (h - ph) / 2;
+  t.x = clamp(t.x, -maxX, maxX);
+  t.y = clamp(t.y, -maxY, maxY);
+  const cx = (w - pw) / 2 - t.x, cy = (h - ph) / 2 - t.y;
+  const v = State.videos[cam];
+  v.style.width = w + 'px';
+  v.style.height = h + 'px';
+  v.style.left = -cx + 'px';
+  v.style.top = -cy + 'px';
+  const clip = State.clips.find(c => c.id === cam);
+  State.panes[cam].querySelector('.pane-label').textContent =
+    `${clip.label} · ${Math.round(t.scale * 100)}%` +
+    (t.x || t.y ? ` · ${Math.round(t.x)},${Math.round(t.y)}` : '');
+  syncCamRow(cam);
+}
+
+function bindPane(pane, cam) {
+  pane.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    pane.setPointerCapture(e.pointerId);
+    pane.classList.add('dragging');
+    let lastX = e.clientX, lastY = e.clientY;
+    const move = (ev) => {
+      const t = State.doc.cams[cam];
+      t.x += (ev.clientX - lastX) / State.stageK;
+      t.y += (ev.clientY - lastY) / State.stageK;
+      lastX = ev.clientX; lastY = ev.clientY;
+      applyCam(cam);
+      scheduleSave();
+    };
+    const up = () => {
+      pane.classList.remove('dragging');
+      pane.removeEventListener('pointermove', move);
+      pane.removeEventListener('pointerup', up);
+    };
+    pushUndoOnce('pane-' + cam);
+    pane.addEventListener('pointermove', move);
+    pane.addEventListener('pointerup', up);
+  });
+  pane.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    pushUndoOnce('zoom-' + cam);
+    const t = State.doc.cams[cam];
+    t.scale = clamp(t.scale * Math.exp(-e.deltaY * 0.0018), 1, 4);
+    applyCam(cam);
+    scheduleSave();
+  }, { passive: false });
+  pane.addEventListener('dblclick', () => {
+    pushUndo();
+    State.doc.cams[cam] = { scale: 1, x: 0, y: 0 };
+    applyCam(cam);
+    scheduleSave();
+  });
+}
+
+function layoutStage() {
+  const main = $('reelsMain');
+  const availH = main.clientHeight - 20;
+  const availW = Math.max(240, main.clientWidth * 0.44);
+  State.stageK = Math.min(availH / OUT_H, availW / OUT_W);
+  const stage = $('stage');
+  stage.style.transform = `scale(${State.stageK})`;
+  const wrap = $('stageWrap');
+  wrap.style.width = OUT_W * State.stageK + 'px';
+  wrap.style.height = OUT_H * State.stageK + 'px';
+}
+
+/* ---------- camera framing rows ---------- */
+function buildCamRows() {
+  const box = $('camRows');
+  box.innerHTML = '';
+  for (const c of State.clips) {
+    const row = document.createElement('div');
+    row.className = 'camrow';
+    row.dataset.cam = c.id;
+    row.innerHTML =
+      `<div class="cr-name">${c.label}${c.is_audio ? ' <span style="color:var(--muted);font-weight:400">· audio</span>' : ''}</div>` +
+      `<div class="cr-vals">—</div>` +
+      `<div class="cr-zoom"><span class="zlbl">zoom</span>` +
+      `<input type="range" min="100" max="400" step="1" value="100" />` +
+      `<span class="zlbl zval">100%</span></div>` +
+      `<button class="small cr-reset" title="Reset this camera's framing">↺</button>`;
+    box.appendChild(row);
+    row.querySelector('input[type=range]').addEventListener('input', (e) => {
+      pushUndoOnce('slider-' + c.id);
+      State.doc.cams[c.id].scale = Number(e.target.value) / 100;
+      applyCam(c.id);
+      scheduleSave();
+    });
+    row.querySelector('.cr-reset').addEventListener('click', () => {
+      pushUndo();
+      State.doc.cams[c.id] = { scale: 1, x: 0, y: 0 };
+      applyCam(c.id);
+      scheduleSave();
+    });
+  }
+  $('camResetAll').addEventListener('click', () => {
+    pushUndo();
+    for (const c of State.clips) {
+      State.doc.cams[c.id] = { scale: 1, x: 0, y: 0 };
+      applyCam(c.id);
+    }
+    scheduleSave();
+  });
+}
+
+function syncCamRow(cam) {
+  const row = document.querySelector(`.camrow[data-cam="${cam}"]`);
+  if (!row) return;
+  const t = State.doc.cams[cam];
+  row.querySelector('input[type=range]').value = Math.round(t.scale * 100);
+  row.querySelector('.zval').textContent = Math.round(t.scale * 100) + '%';
+  row.querySelector('.cr-vals').textContent =
+    `x ${Math.round(t.x)}  y ${Math.round(t.y)}`;
+}
+
+/* ---------- playback ---------- */
+function seekSrc(idx, t) {
+  State.ph.idx = clamp(idx, 0, segs().length - 1);
+  const s = segs()[State.ph.idx];
+  State.ph.srcT = clamp(t, s.in, s.out);
+  for (const id in State.videos) State.videos[id].currentTime = State.ph.srcT;
+}
+function seekOut(T) {
+  const m = outToSrc(T);
+  seekSrc(m.idx, m.t);
+}
+
+function playAll() {
+  State.playing = true;
+  $('playBtn').textContent = '❚❚ Pause';
+  for (const id in State.videos) State.videos[id].play().catch(() => {});
+}
+function pauseAll() {
+  State.playing = false;
+  $('playBtn').textContent = '▶︎ Play';
+  for (const id in State.videos) {
+    State.videos[id].pause();
+    State.videos[id].playbackRate = 1;
+  }
+}
+
+function tick() {
+  const m = State.master;
+  if (m && segs().length) {
+    if (State.playing && !m.seeking) {
+      State.ph.srcT = m.currentTime;
+      const s = segs()[State.ph.idx];
+      if (m.currentTime >= s.out - 0.02) {
+        if (State.ph.idx + 1 < segs().length) {
+          seekSrc(State.ph.idx + 1, segs()[State.ph.idx + 1].in);
+        } else {
+          pauseAll();
+          seekSrc(State.ph.idx, s.out - 1e-3);
+        }
+      } else {
+        // keep the two follower cameras locked to the master clock
+        for (const id in State.videos) {
+          const v = State.videos[id];
+          if (v === m || v.seeking) continue;
+          const d = v.currentTime - m.currentTime;
+          if (Math.abs(d) > 0.09) { v.currentTime = m.currentTime; v.playbackRate = 1; }
+          else if (Math.abs(d) > 0.02) v.playbackRate = clamp(1 - d * 0.6, 0.9, 1.1);
+          else v.playbackRate = 1;
+        }
+      }
+    }
+    const T = phOut();
+    $('tcOut').textContent = `${fmtOut(T)} / ${fmtOut(outDur())}`;
+    $('tcSrc').textContent =
+      `concert ${fmtSrc(State.ph.srcT)} · seg ${State.ph.idx + 1}/${segs().length}`;
+    if (State.playing) {
+      // keep the playhead in view while playing
+      const { start, span } = State.view;
+      if (T > start + span * 0.97 || T < start)
+        State.view.start = clamp(T - span * 0.1, 0, Math.max(0, outDur() - span));
+    }
+    drawTl();
+  }
+  requestAnimationFrame(tick);
+}
+
+function bindTransport() {
+  $('playBtn').addEventListener('click', () => State.playing ? pauseAll() : playAll());
+  document.querySelectorAll('[data-nudge]').forEach(b =>
+    b.addEventListener('click', () =>
+      seekOut(phOut() + Number(b.dataset.nudge) / State.fps)));
+  document.querySelectorAll('[data-jump]').forEach(b =>
+    b.addEventListener('click', () => seekOut(phOut() + Number(b.dataset.jump))));
+  $('splitBtn').addEventListener('click', splitAtPlayhead);
+  $('deleteBtn').addEventListener('click', deleteSelected);
+  $('undoBtn').addEventListener('click', undo);
+}
+
+/* ---------- editing ---------- */
+function pushUndo() {
+  State.undoStack.push(JSON.stringify({
+    segments: segs(), cams: State.doc.cams, selected: State.selected,
+  }));
+  if (State.undoStack.length > 120) State.undoStack.shift();
+  State._undoTag = null;
+  updateStatus();
+}
+/* Collapse a continuous gesture (drag/wheel/slider) into ONE undo step. */
+function pushUndoOnce(tag) {
+  if (State._undoTag === tag) return;
+  pushUndo();
+  State._undoTag = tag;
+}
+function undo() {
+  const snap = State.undoStack.pop();
+  if (!snap) return;
+  const st = JSON.parse(snap);
+  State.doc.segments = st.segments;
+  State.doc.cams = st.cams;
+  State.selected = clamp(st.selected, -1, segs().length - 1);
+  State._undoTag = null;
+  for (const c of State.clips) applyCam(c.id);
+  seekOut(phOut());
+  scheduleSave();
+  updateStatus();
+  drawTl();
+}
+
+function splitAtPlayhead() {
+  const i = State.ph.idx, s = segs()[i], t = State.ph.srcT;
+  if (!s || t - s.in < 0.05 || s.out - t < 0.05) {
+    flashSave('⚠ playhead too close to a cut');
+    return;
+  }
+  pushUndo();
+  segs().splice(i, 1,
+    { in: s.in, out: Math.round(t * 1000) / 1000 },
+    { in: Math.round(t * 1000) / 1000, out: s.out });
+  State.selected = i + 1;
+  State.ph.idx = i + 1;
+  scheduleSave();
+  updateStatus();
+  drawTl();
+}
+
+function deleteSelected() {
+  if (!(State.selected >= 0 && segs().length > 1)) return;
+  pushUndo();
+  const T = Math.min(phOut(), outBase(State.selected));
+  segs().splice(State.selected, 1);
+  State.selected = -1;
+  seekOut(T);
+  scheduleSave();
+  updateStatus();
+  drawTl();
+}
+
+/* ---------- persistence ---------- */
+function scheduleSave() {
+  $('saveState').textContent = 'saving…';
+  clearTimeout(State.saveTimer);
+  State.saveTimer = setTimeout(async () => {
+    try {
+      const r = await api('/api/reels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(State.doc),
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || 'save failed');
+      $('saveState').textContent =
+        '✓ saved ' + new Date().toLocaleTimeString();
+    } catch (e) {
+      $('saveState').textContent = '⚠ save failed — ' + e.message;
+    }
+  }, 500);
+  updateStatus();
+}
+function flashSave(msg) {
+  $('saveState').textContent = msg;
+  setTimeout(() => { if ($('saveState').textContent === msg) $('saveState').textContent = ''; }, 2500);
+}
+
+/* ---------- waveform ---------- */
+async function loadWaveform() {
+  try {
+    const meta = await api('/api/waveform').then(r => r.json());
+    if (!meta.ready) return;
+    const buf = await api('/waveform.u8').then(r => r.arrayBuffer());
+    State.wave = {
+      ready: true, peaks: new Uint8Array(buf),
+      pps: meta.peaks_per_second || 100,
+    };
+    drawTl();
+  } catch (e) { /* waveform is optional */ }
+}
+function peakMax(t0, t1) {
+  const w = State.wave;
+  if (!w.ready) return 0;
+  let i0 = Math.max(0, Math.floor(t0 * w.pps));
+  const i1 = Math.min(w.peaks.length, Math.max(Math.ceil(t1 * w.pps), i0 + 1));
+  let m = 0;
+  for (; i0 < i1; i0++) if (w.peaks[i0] > m) m = w.peaks[i0];
+  return m / 255;
+}
+
+/* ---------- timeline ---------- */
+const Tl = { cvs: null, ctx: null, w: 0, h: 0, drag: null };
+
+function setupTimeline() {
+  Tl.cvs = $('tl');
+  Tl.ctx = Tl.cvs.getContext('2d');
+  resizeTl();
+  Tl.cvs.addEventListener('mousedown', tlDown);
+  window.addEventListener('mousemove', tlMove);
+  window.addEventListener('mouseup', () => { Tl.drag = null; State._undoTag = null; });
+  Tl.cvs.addEventListener('wheel', tlWheel, { passive: false });
+  $('zoomFit').addEventListener('click', () => { fitView(); drawTl(); });
+  $('zoomIn').addEventListener('click', () => zoomView(1 / 1.5));
+  $('zoomOut').addEventListener('click', () => zoomView(1.5));
+}
+function resizeTl() {
+  const dpr = window.devicePixelRatio || 1;
+  Tl.w = Tl.cvs.clientWidth;
+  Tl.h = Tl.cvs.clientHeight;
+  Tl.cvs.width = Math.round(Tl.w * dpr);
+  Tl.cvs.height = Math.round(Tl.h * dpr);
+  Tl.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function fitView() {
+  State.view = { start: 0, span: Math.max(1, outDur()) };
+}
+function zoomView(f, cx) {
+  const v = State.view;
+  const T = cx !== undefined ? xToTime(cx) : v.start + v.span / 2;
+  v.span = clamp(v.span * f, 0.5, Math.max(1, outDur()));
+  v.start = clamp(T - (T - v.start) * f, 0, Math.max(0, outDur() - v.span));
+}
+const timeToX = (t) => (t - State.view.start) / State.view.span * Tl.w;
+const xToTime = (x) => State.view.start + x / Tl.w * State.view.span;
+
+function tickStep(target) {
+  const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+  for (const s of steps) if (s / State.view.span * Tl.w >= target) return s;
+  return 600;
+}
+
+function drawTl() {
+  const ctx = Tl.ctx;
+  if (!ctx || !State.doc) return;
+  const W = Tl.w, H = Tl.h;
+  ctx.clearRect(0, 0, W, H);
+  const css = getComputedStyle(document.documentElement);
+  const cAccent = css.getPropertyValue('--accent').trim() || '#4f8cff';
+  const cMuted = css.getPropertyValue('--muted').trim() || '#8b93a7';
+  const y0 = 20, bh = H - y0 - 6;
+
+  // ruler
+  ctx.font = '10px ui-monospace, Menlo, monospace';
+  ctx.fillStyle = cMuted;
+  ctx.strokeStyle = 'rgba(139,147,167,0.25)';
+  const step = tickStep(70);
+  for (let t = Math.ceil(State.view.start / step) * step;
+       t <= State.view.start + State.view.span; t += step) {
+    const x = timeToX(t);
+    ctx.beginPath(); ctx.moveTo(x, 12); ctx.lineTo(x, H); ctx.stroke();
+    ctx.fillText(fmtOut(t).replace(/\.\d+$/, ''), x + 3, 10);
+  }
+
+  // segments (contiguous in output time)
+  let base = 0;
+  const fills = ['rgba(79,140,255,0.16)', 'rgba(52,211,153,0.13)'];
+  segs().forEach((s, i) => {
+    const d = s.out - s.in;
+    const x0 = timeToX(base), x1 = timeToX(base + d);
+    base += d;
+    if (x1 < -20 || x0 > W + 20) return;
+    const bx = x0 + 1, bw = Math.max(2, x1 - x0 - 2);
+    ctx.fillStyle = fills[i % 2];
+    ctx.fillRect(bx, y0, bw, bh);
+    // waveform inside the block (source-time slice)
+    if (State.wave.ready && bw > 6) {
+      ctx.fillStyle = 'rgba(230,233,239,0.35)';
+      const px = Math.max(1, Math.floor(bw / 300));
+      for (let x = 0; x < bw; x += px) {
+        const t0 = s.in + (x / bw) * d, t1 = s.in + ((x + px) / bw) * d;
+        const p = peakMax(t0, t1);
+        const hh = Math.max(1, p * (bh - 14));
+        ctx.fillRect(bx + x, y0 + bh - hh, px, hh);
+      }
+    }
+    // border + selection
+    ctx.strokeStyle = i === State.selected ? cAccent : 'rgba(42,48,64,0.9)';
+    ctx.lineWidth = i === State.selected ? 2 : 1;
+    ctx.strokeRect(bx + 0.5, y0 + 0.5, bw - 1, bh - 1);
+    if (i === State.selected) {
+      ctx.fillStyle = cAccent;
+      ctx.fillRect(bx, y0, 3, bh);
+      ctx.fillRect(bx + bw - 3, y0, 3, bh);
+    }
+    // labels
+    if (bw > 90) {
+      ctx.fillStyle = 'rgba(230,233,239,0.85)';
+      ctx.fillText(`${d.toFixed(1)}s`, bx + 5, y0 + 12);
+      ctx.fillStyle = 'rgba(139,147,167,0.9)';
+      ctx.fillText(fmtSrc(s.in), bx + 5, y0 + bh - 4);
+      const lbl = fmtSrc(s.out);
+      ctx.fillText(lbl, bx + bw - ctx.measureText(lbl).width - 5, y0 + bh - 4);
+    }
+    ctx.lineWidth = 1;
+  });
+
+  // playhead
+  const px = timeToX(phOut());
+  if (px >= 0 && px <= W) {
+    ctx.strokeStyle = '#fff';
+    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.moveTo(px - 5, 0); ctx.lineTo(px + 5, 0); ctx.lineTo(px, 7);
+    ctx.closePath(); ctx.fill();
+  }
+
+  $('zoomLabel').textContent =
+    `${fmtOut(State.view.start).replace(/\.\d+$/, '')} – ` +
+    `${fmtOut(State.view.start + State.view.span).replace(/\.\d+$/, '')}`;
+}
+
+function hitTest(x) {
+  let base = 0;
+  for (let i = 0; i < segs().length; i++) {
+    const d = segs()[i].out - segs()[i].in;
+    const x0 = timeToX(base), x1 = timeToX(base + d);
+    if (Math.abs(x - x0) <= EDGE_PX) return { idx: i, edge: 'in' };
+    if (Math.abs(x - x1) <= EDGE_PX) return { idx: i, edge: 'out' };
+    if (x > x0 && x < x1) return { idx: i, edge: null };
+    base += d;
+  }
+  return null;
+}
+
+function tlDown(e) {
+  const rect = Tl.cvs.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const hit = hitTest(x);
+  if (hit && hit.edge) {
+    pushUndo();
+    State.selected = hit.idx;
+    Tl.drag = { mode: 'trim', idx: hit.idx, edge: hit.edge, lastX: x };
+  } else {
+    State.selected = hit ? hit.idx : -1;
+    Tl.drag = { mode: 'scrub' };
+    seekOut(xToTime(x));
+  }
+  updateStatus();
+  drawTl();
+}
+
+function tlMove(e) {
+  const rect = Tl.cvs.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  if (!Tl.drag) {
+    if (e.target === Tl.cvs) {
+      const hit = hitTest(x);
+      Tl.cvs.style.cursor = hit && hit.edge ? 'col-resize' : 'crosshair';
+    }
+    return;
+  }
+  if (Tl.drag.mode === 'scrub') {
+    seekOut(xToTime(clamp(x, 0, Tl.w)));
+    return;
+  }
+  // trim: incremental so the ripple under the cursor feels natural
+  const dt = (x - Tl.drag.lastX) / Tl.w * State.view.span;
+  Tl.drag.lastX = x;
+  const s = segs()[Tl.drag.idx];
+  if (Tl.drag.edge === 'in') s.in = clamp(s.in + dt, 0, s.out - MIN_SEG);
+  else s.out = clamp(s.out + dt, s.in + MIN_SEG, State.duration);
+  s.in = Math.round(s.in * 1000) / 1000;
+  s.out = Math.round(s.out * 1000) / 1000;
+  seekOut(phOut());
+  scheduleSave();
+  updateStatus();
+  drawTl();
+}
+
+function tlWheel(e) {
+  e.preventDefault();
+  const rect = Tl.cvs.getBoundingClientRect();
+  if (e.deltaY) zoomView(Math.exp(e.deltaY * 0.0015), e.clientX - rect.left);
+  if (e.deltaX) {
+    State.view.start = clamp(
+      State.view.start + e.deltaX / Tl.w * State.view.span,
+      0, Math.max(0, outDur() - State.view.span));
+  }
+  drawTl();
+}
+
+/* ---------- keys ---------- */
+function bindKeys() {
+  document.addEventListener('keydown', (e) => {
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault(); undo(); return;
+    }
+    if (e.metaKey || e.ctrlKey) return;
+    switch (e.key) {
+      case ' ':
+        e.preventDefault();
+        State.playing ? pauseAll() : playAll();
+        break;
+      case 'ArrowLeft':
+        seekOut(phOut() + (e.shiftKey ? -5 : -1 / State.fps)); break;
+      case 'ArrowRight':
+        seekOut(phOut() + (e.shiftKey ? 5 : 1 / State.fps)); break;
+      case 's': case 'S':
+        splitAtPlayhead(); break;
+      case 'Backspace': case 'Delete':
+        e.preventDefault(); deleteSelected(); break;
+      case 'Escape':
+        State.selected = -1; updateStatus(); drawTl(); break;
+      case '+': case '=':
+        zoomView(1 / 1.5); drawTl(); break;
+      case '-': case '_':
+        zoomView(1.5); drawTl(); break;
+      case '0':
+        fitView(); drawTl(); break;
+    }
+  });
+}
+
+/* ---------- export ---------- */
+function bindExport() {
+  $('exportBtn').addEventListener('click', async () => {
+    // flush any pending edit first so the render sees the latest cut
+    clearTimeout(State.saveTimer);
+    try {
+      await api('/api/reels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(State.doc),
+      });
+      const r = await api('/api/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ style: 'reels' }),
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || 'export failed');
+      $('saveState').textContent = '✓ saved';
+      pollExport();
+    } catch (e) {
+      flashSave('⚠ export failed — ' + e.message);
+    }
+  });
+  $('openBtn').addEventListener('click', () => {
+    api('/api/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: 'reel_3stack.mp4' }),
+    });
+  });
+  refreshExport();  // show ▶ Open if a reel already exists on disk
+}
+
+async function refreshExport() {
+  try {
+    const st = await api('/api/styles').then(r => r.json());
+    const me = (st.styles || []).find(s => s.id === 'reels');
+    if (!me) return false;
+    const job = me.job;
+    const btn = $('exportBtn');
+    if (job && (job.status === 'running' || job.status === 'queued')) {
+      btn.disabled = true;
+      btn.textContent = job.status === 'queued'
+        ? '⏳ queued…'
+        : `⏳ ${job.phase} ${job.progress || 0}%`;
+      return true;
+    }
+    btn.disabled = false;
+    btn.textContent = '🎬 Export reel';
+    if (job && job.status === 'error') flashSave('⚠ render failed — ' + (job.error || ''));
+    $('openBtn').hidden = !me.output;
+    return false;
+  } catch (e) { return false; }
+}
+
+function pollExport() {
+  clearInterval(State.exportTimer);
+  State.exportTimer = setInterval(async () => {
+    const busy = await refreshExport();
+    if (!busy) clearInterval(State.exportTimer);
+  }, 1500);
+  refreshExport();
+}
+
+boot();

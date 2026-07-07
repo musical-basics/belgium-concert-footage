@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Belgium Concert — Reels Production</title>
+<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="reels.css" />
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">📱 Belgium Concert — Reels Production</div>
+  <div class="status" id="status">loading…</div>
+  <div class="spacer"></div>
+  <a href="/" id="backLink" title="Back to the performance marker editor">⇠ Marker editor</a>
+  <button id="undoBtn" title="Undo (⌘Z)" disabled>↶ Undo</button>
+  <button id="exportBtn" class="primary" title="Render the reel (1080×1920, all segments, mastered audio bed)">🎬 Export reel</button>
+  <button id="openBtn" hidden title="Open the finished reel">▶ Open</button>
+</header>
+
+<main id="reelsMain">
+  <section id="stageWrap">
+    <div id="stage">
+      <!-- camera panes injected here (top→bottom per layout) -->
+    </div>
+  </section>
+
+  <section id="side">
+    <section id="transport">
+      <button id="playBtn" title="Space">▶︎ Play</button>
+      <button data-nudge="-1" title="Frame back (←)">⟨ −1f</button>
+      <button data-nudge="1" title="Frame fwd (→)">+1f ⟩</button>
+      <button data-jump="-5" title="−5s (Shift+←)">⟪ −5s</button>
+      <button data-jump="5" title="+5s (Shift+→)">+5s ⟫</button>
+      <div class="tc-block">
+        <div class="tc" id="tcOut">00:00.000</div>
+        <div class="tc-sub" id="tcSrc">concert —</div>
+      </div>
+    </section>
+
+    <div class="card" id="reelCard">
+      <div class="card-head">
+        <h3>Reel</h3>
+        <span class="reelmeta" id="reelMeta">—</span>
+      </div>
+      <div class="seg-actions">
+        <button id="splitBtn" title="Split the compound clip at the playhead — cuts all 3 cameras + audio (S)">✂ Split at playhead</button>
+        <button id="deleteBtn" class="danger" disabled title="Delete the selected segment — the rest of the reel closes up (⌫)">✕ Delete segment</button>
+      </div>
+      <div class="seginfo" id="segInfo">Click a segment on the timeline to select it.</div>
+    </div>
+
+    <div class="card" id="camCard">
+      <div class="card-head">
+        <h3>Camera framing</h3>
+        <button id="camResetAll" class="small" title="Reset zoom and position for all three panes">↺ Reset all</button>
+      </div>
+      <p class="cardhint"><b>Drag a pane</b> in the preview to reposition its
+        camera · <b>wheel / pinch</b> on a pane to zoom · <b>double-click</b>
+        to reset. Framing applies to the whole reel and is matched exactly by
+        the export.</p>
+      <div id="camRows"></div>
+    </div>
+  </section>
+</main>
+
+<section id="timelineWrap">
+  <div id="tlbar">
+    <button id="zoomFit" title="Fit whole reel (0)">Fit</button>
+    <button id="zoomOut" title="Zoom out (−)">−</button>
+    <button id="zoomIn" title="Zoom in (+)">+</button>
+    <span id="zoomLabel" class="zoomlabel">—</span>
+    <span class="tlhint">one compound clip — every cut hits all 3 cameras + audio · click = scrub &amp; select · drag block edges = trim (reel ripples) · <b>S</b> = split at playhead · <b>⌫</b> = delete segment · wheel = zoom</span>
+    <span id="saveState" class="wavestatus"></span>
+  </div>
+  <canvas id="tl"></canvas>
+</section>
+
+<footer id="help">
+  <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>S</b> split · <b>⌫</b> delete segment · <b>Esc</b> deselect · <b>+ −</b> zoom · <b>0</b> fit · <b>⌘Z</b> undo
+</footer>
+
+<script src="auth.js"></script>
+<script src="reels.js"></script>
+</body>
+</html>

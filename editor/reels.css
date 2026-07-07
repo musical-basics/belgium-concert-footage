@@ -1,0 +1,63 @@
+/* Reels production interface — layout on top of the shared styles.css theme. */
+
+#backLink {
+  color: var(--muted); text-decoration: none; font-size: 12px;
+  border: 1px solid var(--line); border-radius: 7px; padding: 6px 11px;
+  background: var(--panel2);
+}
+#backLink:hover { border-color: var(--accent); color: var(--text); }
+
+#reelsMain { flex: 1; display: flex; flex-direction: row; overflow: hidden; padding: 10px 14px; gap: 14px; }
+
+/* ---- portrait preview stage ---- */
+#stageWrap { flex: 0 0 auto; position: relative; overflow: hidden; }
+/* #stage is a real 1080x1920 canvas-space div, scaled down to fit and anchored
+   at the wrap's origin (the wrap is JS-sized to exactly 1080k x 1920k). All
+   pane math happens in output pixels so the preview IS the export geometry. */
+#stage {
+  width: 1080px; height: 1920px; transform-origin: top left;
+  background: #000; border-radius: 18px; overflow: hidden;
+  outline: 1px solid var(--line); position: absolute; top: 0; left: 0;
+}
+.pane { position: relative; overflow: hidden; background: #05060a; }
+.pane + .pane { border-top: 2px solid rgba(0,0,0,0.9); }
+.pane video { position: absolute; display: block; max-width: none; }
+.pane.dragging { cursor: grabbing; }
+.pane:hover { cursor: grab; }
+.pane-label {
+  position: absolute; left: 18px; top: 14px; z-index: 3;
+  background: rgba(10,12,18,0.72); border: 1px solid var(--line);
+  border-radius: 9px; padding: 6px 14px; font-size: 26px; color: var(--text);
+  pointer-events: none; opacity: 0; transition: opacity 0.15s;
+}
+.pane:hover .pane-label, .pane.dragging .pane-label { opacity: 1; }
+
+/* ---- right column ---- */
+#side { flex: 1; display: flex; flex-direction: column; gap: 10px; overflow: auto; min-width: 340px; }
+#transport { display: flex; align-items: center; gap: 8px; }
+.tc-block { margin-left: 8px; }
+#transport .tc { font: 600 16px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.tc-sub { color: var(--muted); font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.reelmeta { color: var(--muted); font-size: 12px; }
+.seg-actions { display: flex; gap: 8px; margin: 4px 0 8px; }
+.seginfo { color: var(--muted); font-size: 12px; min-height: 18px; }
+.seginfo b { color: var(--text); }
+
+/* per-camera framing rows */
+.camrow {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
+  align-items: center; padding: 8px 0; border-top: 1px solid var(--line);
+}
+.camrow:first-child { border-top: 0; }
+.camrow .cr-name { font-weight: 600; }
+.camrow .cr-vals { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.camrow .cr-zoom { grid-column: 1 / 2; display: flex; align-items: center; gap: 8px; }
+.camrow .cr-zoom input[type=range] { flex: 1; }
+.camrow .cr-zoom .zlbl { width: 44px; text-align: right; color: var(--muted); font-size: 11px; }
+.camrow .cr-reset { grid-column: 2 / 3; grid-row: 2; }
+
+/* ---- timeline ---- */
+#timelineWrap { flex: 0 0 auto; padding: 0 14px 8px; display: flex; flex-direction: column; }
+#tlbar { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+#tl { width: 100%; height: 150px; border-radius: 9px; background: var(--panel); display: block; }
