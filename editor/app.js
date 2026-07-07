@@ -104,6 +104,7 @@ async function boot() {
   await loadCamGrades();     // active per-camera grade -> live preview filters
   buildVideos();
   buildAudioSelect();
+  buildCamWeightInputs();    // per-performance camera mix fields (from clips)
 
   State.view = { start: 0, span: State.duration };
 
@@ -749,6 +750,7 @@ function saveForm() {
     composer: $('#fComposer').value.trim(),
     in: +tin.toFixed(3),
     out: +tout.toFixed(3),
+    camera_weights: getCamWeightInputs(),
   };
   pushUndo();
   if (State.selected >= 0 && State.selected < State.perfs.length) {
@@ -768,9 +770,44 @@ function saveForm() {
 function clearForm(keepSel) {
   $('#fTitle').value = ''; $('#fComposer').value = '';
   $('#fIn').value = ''; $('#fOut').value = '';
+  setCamWeightInputs(null);
   if (!keepSel) { State.selected = -1; renderPerfs(); }
   $('#formTitle').textContent = State.selected >= 0 ? `Edit #${State.selected+1}` : 'New performance';
   $('#formDelete').hidden = State.selected < 0;
+}
+
+// ---- per-performance camera mix (auto-cut screen-time weights) -----------
+// One number input per stationary camera; blank = equal weights, 0 = never use.
+// Stored on the performance as {cam: weight} and consumed by render/plan.py.
+function buildCamWeightInputs() {
+  const box = $('#cwInputs');
+  if (!box) return;
+  box.innerHTML = '';
+  State.clips.filter(c => !c.live).forEach(c => {
+    const lbl = document.createElement('label');
+    lbl.className = 'cwcam';
+    lbl.innerHTML = `${escapeHtml(c.label)}<input type="number" min="0" max="100"
+      step="1" class="cwin" data-cam="${c.id}" placeholder="=" />`;
+    box.appendChild(lbl);
+  });
+}
+
+function setCamWeightInputs(weights) {
+  document.querySelectorAll('#cwInputs .cwin').forEach(inp => {
+    const v = weights && weights[inp.dataset.cam];
+    inp.value = (v == null) ? '' : v;
+  });
+}
+
+// {cam: weight} from the form, or null when every field is blank (= equal).
+function getCamWeightInputs() {
+  const w = {};
+  let any = false;
+  document.querySelectorAll('#cwInputs .cwin').forEach(inp => {
+    const v = parseFloat(inp.value);
+    if (inp.value !== '' && isFinite(v) && v >= 0) { w[inp.dataset.cam] = v; any = true; }
+  });
+  return any ? w : null;
 }
 
 function selectPerf(idx, opts = {}) {
@@ -782,6 +819,7 @@ function selectPerf(idx, opts = {}) {
   $('#fTitle').value = p.title || '';
   $('#fComposer').value = p.composer || '';
   $('#fIn').value = p.in; $('#fOut').value = p.out;
+  setCamWeightInputs(p.camera_weights);
   $('#formTitle').textContent = `Edit #${idx+1}`;
   $('#formDelete').hidden = false;
   renderPerfs(); renderBlocks();
@@ -1616,7 +1654,10 @@ function renderPerfs() {
     li.innerHTML = `
       <span class="num">${i+1}</span>
       <span class="meta"><b>${escapeHtml(p.title)}</b>
-        <small>${escapeHtml(p.composer||'—')} · ${fmtTC(p.in)} → ${fmtTC(p.out)}</small></span>
+        <small>${escapeHtml(p.composer||'—')} · ${fmtTC(p.in)} → ${fmtTC(p.out)}${
+          p.camera_weights
+            ? ` · <span class="cwbadge" title="camera mix">🎥 ${Object.values(p.camera_weights).join('/')}</span>`
+            : ''}</small></span>
       <span class="dur">${fmtDur(p.out - p.in)}</span>
       <span class="rowbtns">
         <button class="small" data-act="edit" title="Edit in form">Edit</button>
@@ -2604,6 +2645,7 @@ async function save({ auto = false } = {}) {
     title_scale: State.titleScale || 1,
     performances: State.perfs.map(p => ({
       title: p.title, composer: p.composer, in: p.in, out: p.out,
+      camera_weights: p.camera_weights || null,
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,
@@ -2798,6 +2840,7 @@ window.addEventListener('beforeunload', (e) => {
     title_scale: State.titleScale || 1,
     performances: State.perfs.map(p => ({
       title: p.title, composer: p.composer, in: p.in, out: p.out,
+      camera_weights: p.camera_weights || null,
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,

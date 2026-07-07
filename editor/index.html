@@ -168,6 +168,11 @@
         <label>Out (s)<input id="fOut" type="number" step="0.001" /></label>
         <button data-grab="out" class="small">⟵ playhead</button>
       </div>
+      <div class="row" id="cwRow"
+           title="Relative screen-time weights for the auto-cut cameras (e.g. 25 / 25 / 50). Blank = equal. 0 = never use that camera. Max ~50% per camera (cuts never repeat back-to-back). 5D 2 coverage still wins where it exists.">
+        <span class="cwlbl">Camera mix %</span>
+        <span id="cwInputs"></span>
+      </div>
       <div class="row actions">
         <button id="formSave" class="primary">Save performance</button>
         <button id="formCancel">Clear</button>

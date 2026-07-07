@@ -51,11 +51,61 @@ def _usable_live(t_in, t_out, live_clips):
     return out
 
 
+def _weights_for_no_repeat(target):
+    """Compensate pick-weights for the no-back-to-back rule so the LONG-RUN
+    screen share matches the user's targets.
+
+    Picking `j != prev` with probability ∝ w_j is a Markov chain whose
+    stationary distribution is π_i ∝ w_i·(S − w_i)  (S = Σw). Naively using the
+    targets as pick-weights therefore under-serves heavy cameras (ask 50%, get
+    ~40%). We fixed-point iterate w until π ≈ target.
+
+    Notes: with ≤2 cameras the chain is forced alternation (50/50 no matter
+    what), so targets are returned as-is; and no camera can exceed 50% of cuts
+    under a strict no-repeat rule, so a >50% target saturates near 50%."""
+    cams = list(target)
+    if len(cams) <= 2:
+        return dict(target)
+    tot = sum(target.values())
+    t = {c: target[c] / tot for c in cams}
+    w = dict(t)
+    for _ in range(300):
+        S = sum(w.values())
+        pi = {c: w[c] * (S - w[c]) for c in cams}
+        Z = sum(pi.values()) or 1.0
+        drift = 0.0
+        for c in cams:
+            p = pi[c] / Z
+            drift = max(drift, abs(p - t[c]))
+            w[c] *= (t[c] / max(p, 1e-9)) ** 0.5
+            w[c] = min(max(w[c], 1e-6), 1e6)      # keep boundary targets sane
+        m = max(w.values())
+        for c in cams:
+            w[c] /= m
+        if drift < 1e-4:
+            break
+    return w
+
+
 def build_segments(t_in, t_out, transitions, seed, index,
-                   first_camera=None, live_clips=None):
+                   first_camera=None, live_clips=None, camera_weights=None):
+    """camera_weights: optional {camera_id: relative_weight} for the stationary
+    cameras (e.g. {"back": 25, "livestream": 25, "piano": 50}). Weight 0 (or
+    negative) removes that camera from this performance entirely. When absent,
+    the ORIGINAL unweighted rng.choice path runs, so existing seeds keep
+    producing byte-identical plans."""
     rng = _rng(seed, index)
     total = t_out - t_in
     live = _usable_live(t_in, t_out, live_clips)
+
+    # Stationary-camera pool + weights for this performance. Unknown ids in the
+    # weights map are ignored; cameras missing from the map default to weight 1.
+    weights = None
+    pool = CAMERAS
+    if camera_weights:
+        target = {c: max(float(camera_weights.get(c, 1)), 0.0) for c in CAMERAS}
+        pool = [c for c in CAMERAS if target[c] > 0] or CAMERAS
+        weights = _weights_for_no_repeat({c: target[c] for c in pool})
 
     def live_at(t):
         for c in live:
@@ -107,9 +157,13 @@ def build_segments(t_in, t_out, transitions, seed, index,
         cov = live_at(mid)
         if cov is not None:
             cam = LIVE_CAMERA
-        else:
+        elif weights is None:
             choices = [c for c in CAMERAS if c != prev] or CAMERAS
             cam = rng.choice(choices)
+        else:
+            choices = [c for c in pool if c != prev] or pool
+            ws = [max(weights.get(c, 1.0), 0.0001) for c in choices]
+            cam = rng.choices(choices, weights=ws, k=1)[0]
         prev = cam
         seg = {
             "index": k,

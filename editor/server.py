@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EDITOR_DIR = os.path.join(ROOT, "editor")
+UI_DIST = os.path.join(ROOT, "ui", "dist")     # built v2 UI (Vite+Svelte)
 PROXY_DIR = os.path.join(ROOT, "proxies")
 OUT_DIR = os.path.join(ROOT, "output")
 THUMBS_DIR = os.path.join(OUT_DIR, "thumbs")   # generated performance thumbnails
@@ -147,7 +148,10 @@ _SCHEMA = """
         title    TEXT,
         composer TEXT,
         in_s     REAL NOT NULL,
-        out_s    REAL NOT NULL
+        out_s    REAL NOT NULL,
+        -- optional {camera_id: relative weight} JSON steering the auto-cut's
+        -- camera mix for this piece (render/plan.py); NULL = equal weights
+        camera_weights TEXT
     );
     -- On-screen text overlays ("titles"), each shown over the final render for
     -- its [in_s, out_s] window (global concert seconds). `subtitle` is an
@@ -222,6 +226,10 @@ def db_connect():
         conn.execute("ALTER TABLE project ADD COLUMN title_scale REAL")
     if "camera_grades" not in pcols:
         conn.execute("ALTER TABLE project ADD COLUMN camera_grades TEXT")
+    # ...and per-performance camera mix weights.
+    fcols = {r["name"] for r in conn.execute("PRAGMA table_info(performances)")}
+    if "camera_weights" not in fcols:
+        conn.execute("ALTER TABLE performances ADD COLUMN camera_weights TEXT")
     return conn
 
 
@@ -257,11 +265,22 @@ def db_init():
 
 
 def _write_performances(conn, perfs):
+    # Field-level preserve-if-absent: a client that doesn't know about
+    # camera_weights (stale tab, older tool) omits the KEY entirely — inherit
+    # the stored value by ordinal so its saves can't wipe the mix. A client
+    # that knows the field sends it explicitly (null = clear).
+    prev = {r["ordinal"]: r["camera_weights"] for r in conn.execute(
+        "SELECT ordinal, camera_weights FROM performances")}
+
+    def _cw_json(i, p):
+        if "camera_weights" in p:
+            return json.dumps(p["camera_weights"]) if p.get("camera_weights") else None
+        return prev.get(i)
     conn.execute("DELETE FROM performances")
     conn.executemany(
-        "INSERT INTO performances (ordinal, title, composer, in_s, out_s) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [(i, p.get("title"), p.get("composer"), p.get("in"), p.get("out"))
+        "INSERT INTO performances (ordinal, title, composer, in_s, out_s, camera_weights) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [(i, p.get("title"), p.get("composer"), p.get("in"), p.get("out"), _cw_json(i, p))
          for i, p in enumerate(perfs)],
     )
 
@@ -305,10 +324,17 @@ def _load(conn):
             meta["camera_grades"] = json.loads(cg) if isinstance(cg, str) else cg
         except (TypeError, ValueError):
             pass
+    def _cw(raw):
+        try:
+            return json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
     meta["performances"] = [
-        {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"]}
+        {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"],
+         "camera_weights": _cw(r["camera_weights"])}
         for r in conn.execute(
-            "SELECT title, composer, in_s, out_s FROM performances ORDER BY ordinal"
+            "SELECT title, composer, in_s, out_s, camera_weights "
+            "FROM performances ORDER BY ordinal"
         )
     ]
     meta["titles"] = [
@@ -1231,6 +1257,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/" or path == "":
             return self._serve_file(os.path.join(EDITOR_DIR, "index.html"))
+        if path == "/v2" or path.startswith("/v2/"):
+            # v2 UI (Vite+Svelte build in ui/dist). Static shell stays open like
+            # the v1 editor; its /api calls carry auth. Traversal-guarded; any
+            # non-file path falls back to index.html (SPA routing).
+            rel = os.path.normpath(urllib.parse.unquote(path[len("/v2"):])).lstrip("/")
+            target = os.path.normpath(os.path.join(UI_DIST, rel)) if rel else UI_DIST
+            if not (target == UI_DIST or target.startswith(UI_DIST + os.sep)):
+                return self.send_error(404, "Not found")
+            if not os.path.isfile(target):
+                target = os.path.join(UI_DIST, "index.html")
+            if not os.path.isfile(target):
+                return self.send_error(404, "v2 UI not built — run: cd ui && npm run build")
+            return self._serve_file(target)
         if path == "/thumb-view":
             # Standalone image page: full-size thumbnail + a "Show in Finder"
             # button. Static shell (like the editor); the <img> and the reveal

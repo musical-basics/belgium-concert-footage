@@ -389,6 +389,13 @@ button.region-btn.highlight:hover { background: rgba(34,211,238,0.12); }
 .regline .regrank input { width: 52px; padding: 1px 4px; font-size: 11px; }
 .regline .regdel { margin-left: auto; padding: 0 5px; font-size: 10px; }
 
+/* --- per-performance camera mix (form row + list badge) --- */
+#cwRow .cwlbl { color: var(--muted); font-size: 11px; align-self: center; }
+#cwInputs { display: flex; gap: 8px; flex-wrap: wrap; }
+#cwInputs .cwcam { display: flex; flex-direction: column; gap: 2px; color: var(--muted); font-size: 10px; }
+#cwInputs .cwin { width: 64px; padding: 3px 6px; font-size: 12px; }
+.cwbadge { color: var(--accent2); }
+
 #help { padding: 6px 14px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); background: var(--panel); }
 #help b { color: var(--text); }
 .flash { animation: flash .5s; }

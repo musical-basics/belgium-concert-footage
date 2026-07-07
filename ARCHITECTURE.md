@@ -28,7 +28,12 @@ values remain only as boot fallbacks).
 
 ### Markers (the data every style shares)
 Stored in `markers.db`, mirrored to `markers.json` (what render scripts read):
-- `performances` — the pieces: `{title, composer, in, out}`
+- `performances` — the pieces: `{title, composer, in, out, camera_weights?}`
+  (`camera_weights` = optional `{camera_id: relative weight}` steering the
+  auto-cut's screen-time mix for that piece; weights are compensated for the
+  no-back-to-back-repeat rule so the actual share matches the numbers; 0 =
+  never use that camera; ≤2 cameras or >50% targets degrade to what the
+  no-repeat rule permits — see `render/plan.py`)
 - `titles` — burned-in text overlays
 - `regions` — **generic style regions**: `{kind, perf, in, out, rank, cam}`
   - `kind: "applause"` — crowd reaction for performance `perf`; `rank` 1–10
