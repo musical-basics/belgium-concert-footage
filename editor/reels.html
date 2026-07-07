@@ -8,6 +8,9 @@
 <link rel="stylesheet" href="reels.css" />
 </head>
 <body>
+<!-- Per-camera color grade filters (SVG) — same ffmpeg-eq replication as the
+     main editor, so the pane preview matches the export. Populated by reels.js. -->
+<svg id="gradeFilters" width="0" height="0" style="position:absolute" aria-hidden="true"></svg>
 <header id="topbar">
   <div class="brand">📱 Belgium Concert — Reels Production</div>
   <div class="status" id="status">loading…</div>
@@ -57,9 +60,24 @@
       </div>
       <p class="cardhint"><b>Drag a pane</b> in the preview to reposition its
         camera · <b>wheel / pinch</b> on a pane to zoom · <b>double-click</b>
-        to reset. Framing applies to the whole reel and is matched exactly by
-        the export.</p>
+        to reset. X/Y sliders range over the reachable pan at the current zoom
+        (zoom in to unlock more travel). Framing applies to the whole reel and
+        is matched exactly by the export.</p>
       <div id="camRows"></div>
+    </div>
+
+    <div class="card" id="colorCard">
+      <div class="card-head">
+        <h3>Camera color</h3>
+        <span id="colorStatus" class="reelmeta">—</span>
+        <div class="spacer"></div>
+        <button id="colorResetAll" class="small" title="Reset all cameras to the built-in defaults">↺ Reset all</button>
+        <button id="colorSave" class="primary small" title="Persist the grades — applies to the reel export AND the main highlights render">Save color</button>
+      </div>
+      <p class="cardhint">The <b>same per-camera grade</b> as the main editor —
+        one setting shared by the reel export and the highlights render. Panes
+        preview live as you drag; takes effect on <b>Save color</b>.</p>
+      <div id="colorCams"></div>
     </div>
   </section>
 </main>

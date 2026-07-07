@@ -37,6 +37,7 @@ const State = {
   undoStack: [],
   saveTimer: null,
   exportTimer: null,
+  color: null,                              // shared camera grades (loadGrades)
 };
 
 const $ = (id) => document.getElementById(id);
@@ -94,6 +95,7 @@ async function boot() {
 
   buildStage();
   buildCamRows();
+  loadGrades();
   layoutStage();
   setupTimeline();
   fitView();
@@ -236,49 +238,265 @@ function layoutStage() {
 function buildCamRows() {
   const box = $('camRows');
   box.innerHTML = '';
-  for (const c of State.clips) {
+  const posName = (i, n) => n === 3 ? ['top', 'middle', 'bottom'][i] : `#${i + 1}`;
+  State.clips.forEach((c, ci) => {
     const row = document.createElement('div');
     row.className = 'camrow';
     row.dataset.cam = c.id;
     row.innerHTML =
-      `<div class="cr-name">${c.label}${c.is_audio ? ' <span style="color:var(--muted);font-weight:400">· audio</span>' : ''}</div>` +
-      `<div class="cr-vals">—</div>` +
-      `<div class="cr-zoom"><span class="zlbl">zoom</span>` +
-      `<input type="range" min="100" max="400" step="1" value="100" />` +
-      `<span class="zlbl zval">100%</span></div>` +
-      `<button class="small cr-reset" title="Reset this camera's framing">↺</button>`;
+      `<div class="cr-head">` +
+      `<span class="cr-pos">${posName(ci, State.clips.length)}</span>` +
+      `<span class="cr-name">${c.label}` +
+      `${c.is_audio ? ' <span style="color:var(--muted);font-weight:400">· audio</span>' : ''}</span>` +
+      `<span class="cr-vals">—</span><div class="spacer"></div>` +
+      `<button class="small cr-up" title="Move this camera up in the stack" ${ci === 0 ? 'disabled' : ''}>▲</button>` +
+      `<button class="small cr-down" title="Move this camera down in the stack" ${ci === State.clips.length - 1 ? 'disabled' : ''}>▼</button>` +
+      `<button class="small cr-reset" title="Reset this camera's framing">↺</button></div>` +
+      `<div class="cr-slider"><span class="klbl">zoom</span>` +
+      `<input data-k="scale" type="range" min="100" max="400" step="1" value="100" />` +
+      `<span class="kval k-scale">100%</span></div>` +
+      `<div class="cr-slider"><span class="klbl">x</span>` +
+      `<input data-k="x" type="range" min="0" max="0" step="1" value="0" />` +
+      `<span class="kval k-x">0</span></div>` +
+      `<div class="cr-slider"><span class="klbl">y</span>` +
+      `<input data-k="y" type="range" min="0" max="0" step="1" value="0" />` +
+      `<span class="kval k-y">0</span></div>`;
     box.appendChild(row);
-    row.querySelector('input[type=range]').addEventListener('input', (e) => {
-      pushUndoOnce('slider-' + c.id);
-      State.doc.cams[c.id].scale = Number(e.target.value) / 100;
-      applyCam(c.id);
-      scheduleSave();
+    row.querySelectorAll('input[type=range]').forEach((inp) => {
+      inp.addEventListener('input', () => {
+        const t = State.doc.cams[c.id];
+        pushUndoOnce('fr-' + inp.dataset.k + '-' + c.id);
+        if (inp.dataset.k === 'scale') t.scale = Number(inp.value) / 100;
+        else t[inp.dataset.k] = Number(inp.value);
+        applyCam(c.id);
+        scheduleSave();
+      });
     });
+    row.querySelector('.cr-up').addEventListener('click', () => moveCam(c.id, -1));
+    row.querySelector('.cr-down').addEventListener('click', () => moveCam(c.id, 1));
     row.querySelector('.cr-reset').addEventListener('click', () => {
       pushUndo();
       State.doc.cams[c.id] = { scale: 1, x: 0, y: 0 };
       applyCam(c.id);
       scheduleSave();
     });
-  }
-  $('camResetAll').addEventListener('click', () => {
+    syncCamRow(c.id);
+  });
+  // onclick (not addEventListener) so rebuilds after a reorder stay idempotent
+  $('camResetAll').onclick = () => {
     pushUndo();
     for (const c of State.clips) {
       State.doc.cams[c.id] = { scale: 1, x: 0, y: 0 };
       applyCam(c.id);
     }
     scheduleSave();
-  });
+  };
 }
 
 function syncCamRow(cam) {
   const row = document.querySelector(`.camrow[data-cam="${cam}"]`);
   if (!row) return;
   const t = State.doc.cams[cam];
-  row.querySelector('input[type=range]').value = Math.round(t.scale * 100);
-  row.querySelector('.zval').textContent = Math.round(t.scale * 100) + '%';
+  const { w: pw, h: ph } = paneSize(cam);
+  const cover = Math.max(pw / SRC_W, ph / SRC_H);
+  const s = cover * t.scale;
+  // pan travel available at the current zoom — the same clamp applyCam enforces
+  const maxX = Math.floor((SRC_W * s - pw) / 2);
+  const maxY = Math.floor((SRC_H * s - ph) / 2);
+  const set = (k, min, max, val, txt) => {
+    const inp = row.querySelector(`input[data-k="${k}"]`);
+    inp.min = min; inp.max = max; inp.value = val;
+    inp.disabled = min >= max;
+    row.querySelector('.k-' + k).textContent = txt;
+  };
+  set('scale', 100, 400, Math.round(t.scale * 100), Math.round(t.scale * 100) + '%');
+  set('x', -maxX, maxX, Math.round(t.x), `${Math.round(t.x)} px`);
+  set('y', -maxY, maxY, Math.round(t.y), `${Math.round(t.y)} px`);
   row.querySelector('.cr-vals').textContent =
-    `x ${Math.round(t.x)}  y ${Math.round(t.y)}`;
+    `x ${Math.round(t.x)} · y ${Math.round(t.y)}`;
+}
+
+/* ---------- camera stack order ---------- */
+function moveCam(camId, dir) {
+  const L = State.doc.layout;
+  const i = L.indexOf(camId), j = i + dir;
+  if (i < 0 || j < 0 || j >= L.length) return;
+  pushUndo();
+  [L[i], L[j]] = [L[j], L[i]];
+  applyLayoutOrder();
+  scheduleSave();
+}
+
+/* Re-stack the existing panes to match doc.layout (no video reload) and
+   rebuild the control rows in the new order. */
+function applyLayoutOrder() {
+  State.clips = State.doc.layout.map(id => State.clips.find(c => c.id === id))
+    .filter(Boolean);
+  const stage = $('stage');
+  const n = State.clips.length;
+  const paneH = Math.floor(OUT_H / n);
+  State.clips.forEach((c, i) => {
+    const pane = State.panes[c.id];
+    pane.style.height = (i === n - 1 ? OUT_H - paneH * (n - 1) : paneH) + 'px';
+    stage.appendChild(pane);      // append in order = final stack order
+    applyCam(c.id);
+  });
+  buildCamRows();
+  buildColorRows();
+  updateStatus();
+}
+
+/* ---------- camera color grades (shared with the main editor) ----------
+ * Same /api/camera-grades document the marker editor edits: one per-camera
+ * {brightness, gamma, contrast, saturation} used by BOTH renders. Live pane
+ * preview replicates render.py's ffmpeg `eq` with an SVG lookup-table filter
+ * on the LIMITED-RANGE luma bytes (16..235) — the exact math app.js uses, so
+ * the preview matches the export. Explicit Save (grades are project-wide).
+ */
+const _svgNS = 'http://www.w3.org/2000/svg';
+const _gradeFilterIds = {};
+let _gradeFilterSeq = 0;
+
+function _gradeNeutral(g) {
+  return Math.abs((+g.brightness || 0)) < 1e-6 &&
+         Math.abs((+g.gamma || 1) - 1) < 1e-6 &&
+         Math.abs((+g.contrast || 1) - 1) < 1e-6 &&
+         Math.abs((+g.saturation || 1) - 1) < 1e-6;
+}
+
+function ensureGradeFilter(g) {
+  if (!g || _gradeNeutral(g)) return '';
+  const key = `${+g.brightness || 0}|${+g.gamma || 1}|${+g.contrast || 1}|${+g.saturation || 1}`;
+  if (_gradeFilterIds[key]) return _gradeFilterIds[key];
+  const b = +g.brightness || 0, gamma = +g.gamma || 1;
+  const contrast = +g.contrast || 1, sat = +g.saturation || 1;
+  const svg = document.getElementById('gradeFilters');
+  const id = `grade${_gradeFilterSeq++}`;
+  const filter = document.createElementNS(_svgNS, 'filter');
+  filter.setAttribute('id', id);
+  filter.setAttribute('color-interpolation-filters', 'sRGB');
+  // ffmpeg eq curve (contrast -> brightness -> gamma) applied to the video's
+  // limited-range bytes, sampled into one LUT — see app.js for the derivation.
+  const N = 65;
+  const table = [];
+  for (let k = 0; k < N; k++) {
+    const d = k / (N - 1);
+    const v = (16 + 219 * d) / 255;
+    let y = (v - 0.5) * contrast + 0.5 + b;
+    y = Math.max(0, Math.min(1, y));
+    y = Math.pow(y, 1 / gamma);
+    const out = Math.max(0, Math.min(255, 255 * y));
+    table.push(Math.max(0, Math.min(1, (out - 16) / 219)).toFixed(5));
+  }
+  const lut = document.createElementNS(_svgNS, 'feComponentTransfer');
+  for (const ch of ['R', 'G', 'B']) {
+    const fn = document.createElementNS(_svgNS, `feFunc${ch}`);
+    fn.setAttribute('type', 'table');
+    fn.setAttribute('tableValues', table.join(' '));
+    lut.appendChild(fn);
+  }
+  filter.appendChild(lut);
+  if (Math.abs(sat - 1) > 1e-6) {
+    const cm = document.createElementNS(_svgNS, 'feColorMatrix');
+    cm.setAttribute('type', 'saturate');
+    cm.setAttribute('values', sat.toFixed(5));
+    filter.appendChild(cm);
+  }
+  svg.appendChild(filter);
+  _gradeFilterIds[key] = id;
+  return id;
+}
+
+function applyCameraFilters() {
+  if (!State.color) return;
+  for (const c of State.clips) {
+    const id = ensureGradeFilter(State.color.grades[c.id]);
+    State.videos[c.id].style.filter = id ? `url(#${id})` : 'none';
+  }
+}
+
+async function loadGrades() {
+  try {
+    const d = await api('/api/camera-grades').then(r => r.json());
+    State.color = {
+      keys: d.keys, bounds: d.bounds, defaults: d.defaults,
+      grades: d.grades, dirty: false,
+    };
+    buildColorRows();
+    applyCameraFilters();
+  } catch (e) {
+    $('colorStatus').textContent = '⚠ failed to load grades';
+  }
+}
+
+function colorDirty(on) {
+  State.color.dirty = on;
+  $('colorStatus').textContent = on ? 'unsaved — hit Save color' : '—';
+}
+
+function buildColorRows() {
+  if (!State.color) return;
+  const box = $('colorCams');
+  box.innerHTML = '';
+  const K = State.color.keys;
+  for (const c of State.clips) {
+    const g = State.color.grades[c.id] ||
+      (State.color.grades[c.id] = Object.assign({}, State.color.defaults[c.id]));
+    const row = document.createElement('div');
+    row.className = 'gradecam';
+    row.dataset.cam = c.id;
+    row.innerHTML =
+      `<div class="cr-head"><span class="cr-name">${c.label}</span>` +
+      `<div class="spacer"></div>` +
+      `<button class="small gr-reset" title="Reset this camera to the built-in default grade">↺</button></div>` +
+      K.map(k => {
+        const [lo, hi] = State.color.bounds[k];
+        return `<div class="cr-slider"><span class="klbl">${k}</span>` +
+          `<input data-k="${k}" type="range" min="${lo}" max="${hi}" step="0.01" value="${g[k]}" />` +
+          `<span class="kval k-${k}">${(+g[k]).toFixed(2)}</span></div>`;
+      }).join('');
+    box.appendChild(row);
+    row.querySelectorAll('input[type=range]').forEach((inp) => {
+      inp.addEventListener('input', () => {
+        const k = inp.dataset.k;
+        State.color.grades[c.id][k] = Number(inp.value);
+        row.querySelector('.k-' + k).textContent = Number(inp.value).toFixed(2);
+        applyCameraFilters();
+        colorDirty(true);
+      });
+    });
+    row.querySelector('.gr-reset').addEventListener('click', () => {
+      State.color.grades[c.id] = Object.assign({}, State.color.defaults[c.id]);
+      buildColorRows();
+      applyCameraFilters();
+      colorDirty(true);
+    });
+  }
+  // onclick so rebuilds (reorder/reset) don't stack handlers
+  $('colorResetAll').onclick = () => {
+    for (const id in State.color.grades)
+      State.color.grades[id] = Object.assign({}, State.color.defaults[id] || {});
+    buildColorRows();
+    applyCameraFilters();
+    colorDirty(true);
+  };
+  $('colorSave').onclick = async () => {
+    $('colorStatus').textContent = 'saving…';
+    try {
+      // send ALL cameras (incl. ones not shown here, e.g. the 5D 2) so the
+      // shared grade document is replaced whole without dropping anything
+      const r = await api('/api/camera-grades', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grades: State.color.grades }),
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || 'save failed');
+      colorDirty(false);
+      $('colorStatus').textContent = '✓ saved ' + new Date().toLocaleTimeString();
+    } catch (e) {
+      $('colorStatus').textContent = '⚠ save failed — ' + e.message;
+    }
+  };
 }
 
 /* ---------- playback ---------- */
@@ -362,7 +580,8 @@ function bindTransport() {
 /* ---------- editing ---------- */
 function pushUndo() {
   State.undoStack.push(JSON.stringify({
-    segments: segs(), cams: State.doc.cams, selected: State.selected,
+    segments: segs(), cams: State.doc.cams, layout: State.doc.layout,
+    selected: State.selected,
   }));
   if (State.undoStack.length > 120) State.undoStack.shift();
   State._undoTag = null;
@@ -382,6 +601,10 @@ function undo() {
   State.doc.cams = st.cams;
   State.selected = clamp(st.selected, -1, segs().length - 1);
   State._undoTag = null;
+  if (st.layout && st.layout.join() !== State.doc.layout.join()) {
+    State.doc.layout = st.layout;
+    applyLayoutOrder();
+  }
   for (const c of State.clips) applyCam(c.id);
   seekOut(phOut());
   scheduleSave();
