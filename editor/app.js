@@ -30,6 +30,9 @@ const State = {
   playing: false,
   pendingIn: null,
   pendingOut: null,
+  workCursor: null,    // "work here" position (seconds) dropped by clicking the timeline
+                       // while playing, so edits happen at the click WITHOUT moving
+                       // playback. null = use the live playhead. Cleared on pause/seek.
   perfs: [],
   selected: -1,
   exports: {},         // 1-based index -> {status, elapsed, file, error} (export jobs)
@@ -630,6 +633,13 @@ function pauseAll() {
   State.playing = false;
   $('#playBtn').textContent = '▶︎ Play';
   State.videos.forEach(v => { if (v.src) { v.pause(); v.playbackRate = 1.0; } });
+  // If a work cursor was dropped while playing, land the playhead there on pause
+  // so you can frame-step / refine at the spot you were inspecting.
+  if (State.workCursor != null) {
+    const wc = State.workCursor;
+    clearWorkCursor();
+    seekAll(wc);
+  }
   syncFollowers();
   scheduleGradeStills();           // paused -> show exact ffmpeg-graded frame
 }
@@ -669,7 +679,7 @@ function wireTransport() {
     b.onclick = () => { pauseAll(); seekAll(State.master.currentTime + Number(b.dataset.nudge) / State.fps); };
   });
   document.querySelectorAll('[data-jump]').forEach(b => {
-    b.onclick = () => seekAll(State.master.currentTime + Number(b.dataset.jump));
+    b.onclick = () => { clearWorkCursor(); seekAll(State.master.currentTime + Number(b.dataset.jump)); };
   });
   $('#markInBtn').onclick = markIn;
   $('#markOutBtn').onclick = markOut;
@@ -686,11 +696,11 @@ function wireTransport() {
 // I / O write the playhead into the In / Out fields of the region being built
 // in the form, then refresh the orange preview from those fields.
 function markIn() {
-  $('#fIn').value = +State.master.currentTime.toFixed(3);
+  $('#fIn').value = +markTime().toFixed(3);
   syncPendingFromForm();
 }
 function markOut() {
-  $('#fOut').value = +State.master.currentTime.toFixed(3);
+  $('#fOut').value = +markTime().toFixed(3);
   syncPendingFromForm();
 }
 function refreshPending() {
@@ -723,7 +733,7 @@ function wireForm() {
   $('#fOut').addEventListener('input', syncPendingFromForm);
   document.querySelectorAll('[data-grab]').forEach(b => {
     b.onclick = () => {
-      const t = +State.master.currentTime.toFixed(3);
+      const t = +markTime().toFixed(3);
       if (b.dataset.grab === 'in') $('#fIn').value = t; else $('#fOut').value = t;
       syncPendingFromForm();                       // reflect the grab on the waveform
     };
@@ -874,7 +884,7 @@ const TITLE_DEFAULT_LEN = 4;       // seconds for a freshly created title
 
 function addTitle() {
   pushUndo();
-  const t = playTime();
+  const t = markTime();
   let tin = t, tout = Math.min(State.duration, t + TITLE_DEFAULT_LEN);
   if (tout - tin < 1) tin = Math.max(0, tout - TITLE_DEFAULT_LEN);   // near the very end
   const title = { text: 'Title', subtitle: '', in: +tin.toFixed(3), out: +tout.toFixed(3) };
@@ -1034,6 +1044,18 @@ const fmtClock = (t) => {
            : `${m}:${String(s).padStart(2,'0')}`;
 };
 function playTime() { return State.master ? State.master.currentTime : 0; }
+// Where an edit should land: the "work cursor" if one is set (dropped by clicking
+// the timeline while playing), otherwise the live playhead. Use this for Mark
+// In/Out, ⟵-playhead grabs, and Add performance/title/region so the user can set
+// edit points anywhere without yanking playback.
+function markTime() { return State.workCursor != null ? State.workCursor : playTime(); }
+// Drop / clear the work cursor. Clearing on pause/manual-seek keeps behavior
+// intuitive: the cursor only exists while you're playing and inspecting elsewhere.
+function setWorkCursor(tm) {
+  State.workCursor = tm == null ? null : Math.max(0, Math.min(State.duration, tm));
+  markTimelineDirty();
+}
+function clearWorkCursor() { if (State.workCursor != null) setWorkCursor(null); }
 function timeToX(tm) { return (tm - State.view.start) / State.view.span * State.tl.w; }
 function xToTime(x)  { return State.view.start + x / State.tl.w * State.view.span; }
 function clampStart(start, span) { return Math.max(0, Math.min(State.duration - span, start)); }
@@ -1321,6 +1343,20 @@ function drawTimeline(playT) {
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, t.h); ctx.stroke();
   }
+  // work cursor (amber) — the "edit here" position while playback runs elsewhere
+  if (State.workCursor != null) {
+    const wx = timeToX(State.workCursor);
+    if (wx >= -6 && wx <= t.w + 6) {
+      ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(wx, 0); ctx.lineTo(wx, t.h); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#f59e0b';                 // little flag at the top
+      ctx.beginPath();
+      ctx.moveTo(wx, 0); ctx.lineTo(wx + 9, 0); ctx.lineTo(wx, 9); ctx.closePath();
+      ctx.fill();
+    }
+  }
 
   const o = t.octx;
   o.setTransform(1, 0, 0, 1, 0, 0);
@@ -1547,7 +1583,7 @@ function wireTimelineInput() {
     }
   }, { passive: false });
 
-  let scrubbing = false, downX = 0, moved = false;
+  let scrubbing = false, cursoring = false, downX = 0, moved = false;
   let drag = null, dragSnapped = false;             // { i, edge } while resizing a region
   const localX = (e) => e.clientX - t.wave.getBoundingClientRect().left;
 
@@ -1590,8 +1626,17 @@ function wireTimelineInput() {
       return;
     }
     pendingClickBlock = blockHit(x, y);
-    scrubbing = true;
-    seekAll(xToTime(x));
+    // While PLAYING, a timeline click drops a "work cursor" at the clicked spot
+    // for editing there — playback keeps running, no jump. While paused, it
+    // scrubs the playhead as before.
+    if (State.playing) {
+      cursoring = true;
+      setWorkCursor(xToTime(x));
+    } else {
+      scrubbing = true;
+      clearWorkCursor();
+      seekAll(xToTime(x));
+    }
   });
   window.addEventListener('mousemove', (e) => {
     if (drag) {
@@ -1609,6 +1654,12 @@ function wireTimelineInput() {
       if (drag.kind === 'titlemove') moveTitle(drag, xToTime(localX(e)));
       else if (drag.kind === 'live') applyLiveDrag(drag, xToTime(localX(e)));
       else applyHandleDrag(drag, xToTime(localX(e)));
+      return;
+    }
+    if (cursoring) {                                // dragging the work cursor
+      const x = localX(e);
+      if (Math.abs(x - downX) > 3) { moved = true; pendingClickBlock = -1; }
+      setWorkCursor(xToTime(x));
       return;
     }
     if (!scrubbing) return;
@@ -1640,8 +1691,10 @@ function wireTimelineInput() {
       drag = null;
       return;
     }
-    if (scrubbing && !moved && pendingClickBlock >= 0) selectPerf(pendingClickBlock, { seek: false });
-    scrubbing = false; pendingClickBlock = -1;
+    if ((scrubbing || cursoring) && !moved && pendingClickBlock >= 0) {
+      selectPerf(pendingClickBlock, { seek: false });
+    }
+    scrubbing = false; cursoring = false; pendingClickBlock = -1;
   });
   // cursor hint when hovering an edge handle (perf or title)
   t.wave.addEventListener('mousemove', (e) => {
@@ -1986,7 +2039,7 @@ async function revealThumb(url) {
 // 5D 2 live-clip toolbar: cut at playhead, restore full extent, remove.
 function wireLive() {
   $('#liveCut').onclick = () => {
-    if (!cutLiveAt(playTime())) {
+    if (!cutLiveAt(markTime())) {
       $('#status').textContent = 'move the playhead inside a 5D 2 clip (with room on both sides) to cut';
     }
   };
@@ -2830,7 +2883,7 @@ function wireKeys() {
         break;
       case 's': case 'S':
         if (e.metaKey || e.ctrlKey) break;   // leave ⌘S (save) to its own handler
-        if (State.selectedLive >= 0) { e.preventDefault(); cutLiveAt(playTime()); }
+        if (State.selectedLive >= 0) { e.preventDefault(); cutLiveAt(markTime()); }
         break;
       case 'Escape':
         if (State.selectedLive >= 0) { e.preventDefault(); deselectLive(); }
