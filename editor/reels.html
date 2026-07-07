@@ -14,6 +14,12 @@
 <header id="topbar">
   <div class="brand">📱 Belgium Concert — Reels Production</div>
   <div class="status" id="status">loading…</div>
+  <label class="projlbl">Reel
+    <select id="projSelect" title="Switch between saved reel projects — each keeps its own cut, framing and markers"></select>
+  </label>
+  <button id="projNew" title="New reel project — starts fresh with the ENTIRE show as one compound clip">＋ New</button>
+  <button id="projRename" class="small" title="Rename this reel project">✎</button>
+  <button id="projDelete" class="small danger" title="Delete this reel project (its cut list only — footage is untouched)">🗑</button>
   <div class="spacer"></div>
   <a href="/" id="backLink" title="Back to the performance marker editor">⇠ Marker editor</a>
   <button id="undoBtn" title="Undo (⌘Z)" disabled>↶ Undo</button>
@@ -97,7 +103,7 @@
 </section>
 
 <footer id="help">
-  <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>S</b> split · <b>M</b> marker · <b>⌫</b> delete selection · <b>Esc</b> deselect · <b>+ −</b> zoom · <b>0</b> fit · <b>⌘Z</b> undo · hold <b>Shift</b> while dragging = no snap
+  <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>S</b> split · <b>M</b> marker · <b>⌫</b> delete selection · <b>Esc</b> deselect · <b>⌘+ ⌘−</b> zoom at playhead · <b>+ −</b> zoom · <b>0 / ⌘0</b> fit · <b>⌘Z</b> undo · hold <b>Shift</b> while dragging = no snap
 </footer>
 
 <script src="auth.js"></script>

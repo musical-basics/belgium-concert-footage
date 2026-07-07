@@ -15,8 +15,11 @@ in output pixels, same math as the interface preview) pans each 16:9 source
 inside its 1080x640 pane. Per-camera color grades (markers.json
 camera_grades) are applied exactly like the main render.
 
-Run:  python3 render/style_reels.py [--dry-run] [--reels PATH] [--markers PATH]
-Output: output/reel_3stack.mp4 (+ .plan.json)
+reels.json is a multi-project store; this renders the `active` project (the
+one open in the interface) unless --project ID is given.
+
+Run:  python3 render/style_reels.py [--dry-run] [--project ID]
+Output: output/reel_<project-name>.mp4 (+ .plan.json)
 
 Progress lines are "cut seg X/Y" / "✓ <file>" — the shared style-render
 protocol the editor's export poller parses.
@@ -24,6 +27,7 @@ protocol the editor's export poller parses.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -34,8 +38,14 @@ ROOT = R.ROOT
 OUT_DIR = R.OUT_DIR
 SEG_DIR = os.path.join(ROOT, "cache", "segments")
 
-NAME = "reel_3stack"
 DEFAULT_LAYOUT = ["livestream", "piano", "back"]
+
+
+def slug(s):
+    if hasattr(R, "slugify"):
+        return R.slugify(s)
+    s = re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+    return s or "reel"
 
 _DIMS_CACHE = {}
 
@@ -80,6 +90,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reels", default=os.path.join(ROOT, "reels.json"))
     ap.add_argument("--markers", default=os.path.join(ROOT, "markers.json"))
+    ap.add_argument("--project", default=None,
+                    help="reel project id (default: the store's active project)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--encoder", default="auto")
     args = ap.parse_args()
@@ -87,7 +99,18 @@ def main():
     if not os.path.isfile(args.reels):
         sys.exit("No reels.json — open /reels.html and make at least one edit first.")
     with open(args.reels) as f:
-        doc = json.load(f)
+        raw = json.load(f)
+    if "projects" in raw:                       # multi-project store
+        projs = raw.get("projects") or []
+        pid = args.project or raw.get("active")
+        doc = next((p for p in projs if p.get("id") == pid),
+                   projs[0] if projs else None)
+        if doc is None:
+            sys.exit("reels.json has no projects — create one at /reels.html.")
+    else:                                       # legacy single-doc file
+        doc = raw
+    pname = str(doc.get("name") or "3stack")
+    name = "reel_" + slug(pname)
     if os.path.isfile(args.markers):
         with open(args.markers) as f:
             R.apply_camera_grades(json.load(f).get("camera_grades"))
@@ -114,7 +137,7 @@ def main():
     plan = {"style": "reels", "layout": layout, "cams": cams_cfg,
             "segments": [{"in": s["in"], "out": s["out"]} for s in segs],
             "duration": round(total, 3)}
-    with open(os.path.join(OUT_DIR, NAME + ".plan.json"), "w") as f:
+    with open(os.path.join(OUT_DIR, name + ".plan.json"), "w") as f:
         json.dump(plan, f, indent=2)
     for k, s in enumerate(segs):
         print(f"  seg {k+1:3d}  {float(s['in']):8.2f} - {float(s['out']):8.2f}"
@@ -123,7 +146,7 @@ def main():
         print("(dry run — no video encoded)")
         return
 
-    seg_dir = os.path.join(SEG_DIR, NAME)
+    seg_dir = os.path.join(SEG_DIR, name)
     os.makedirs(seg_dir, exist_ok=True)
     enc = R.encoder_args(encoder)
     hw = R.decode_hwaccel(encoder)
@@ -168,7 +191,7 @@ def main():
            "-f", "concat", "-safe", "0", "-i", alist,
            "-c:a", "aac", "-b:a", "256k", "-ar", "48000", audio_only])
 
-    out_path = os.path.join(OUT_DIR, NAME + ".mp4")
+    out_path = os.path.join(OUT_DIR, name + ".mp4")
     R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-i", video_only, "-i", audio_only,
            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "copy",

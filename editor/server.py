@@ -15,6 +15,7 @@ No third-party dependencies.
 import hmac
 import html
 import json
+import uuid
 import os
 import re
 import sqlite3
@@ -455,14 +456,137 @@ def _reels_default():
     }
 
 
-def load_reels():
-    if not os.path.isfile(REELS_JSON):
-        return _reels_default()
-    try:
-        with open(REELS_JSON) as f:
-            return clean_reels(json.load(f))
-    except Exception:
-        return _reels_default()
+# reels.json is a multi-PROJECT store: each project ("Reel") is one full doc
+# (segments + cams + layout + markers) so every piece can have its own saved
+# cut. "New" projects start from the default doc = the ENTIRE show as one
+# compound clip. The renderer exports the `active` project (or --project ID).
+def _clean_project(p):
+    doc = clean_reels(p if isinstance(p, dict) else {})
+    doc["id"] = str(p.get("id") or uuid.uuid4().hex[:8])
+    doc["name"] = (str(p.get("name") or "").strip() or "Untitled reel")[:80]
+    doc["created"] = float(p.get("created") or time.time())
+    doc["modified"] = float(p.get("modified") or doc["created"])
+    return doc
+
+
+def _reels_load_store():
+    """Load (and normalize) the project store; migrates a v1 single-doc file."""
+    raw = None
+    if os.path.isfile(REELS_JSON):
+        try:
+            with open(REELS_JSON) as f:
+                raw = json.load(f)
+        except Exception:
+            raw = None
+    if raw is None:
+        proj = _clean_project({"name": "Reel 1"})
+        return {"version": 2, "active": proj["id"], "projects": [proj]}
+    if "projects" not in raw:                    # v1: one bare doc at top level
+        proj = _clean_project({**raw, "name": "Reel 1"})
+        return {"version": 2, "active": proj["id"], "projects": [proj]}
+    projects = [_clean_project(p) for p in (raw.get("projects") or [])]
+    if not projects:
+        projects = [_clean_project({"name": "Reel 1"})]
+    active = raw.get("active")
+    if active not in {p["id"] for p in projects}:
+        active = projects[0]["id"]
+    return {"version": 2, "active": active, "projects": projects}
+
+
+def _reels_write_store(store):
+    tmp = REELS_JSON + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(store, f, indent=1)
+    os.replace(tmp, REELS_JSON)
+
+
+def _reels_find(store, pid):
+    return next((p for p in store["projects"] if p["id"] == pid), None)
+
+
+def _reels_meta(store):
+    return [{"id": p["id"], "name": p["name"], "modified": p["modified"],
+             "segments": len(p["segments"]),
+             "reel": round(sum(s["out"] - s["in"] for s in p["segments"]), 3)}
+            for p in store["projects"]]
+
+
+def _reels_state(store):
+    return {"active": store["active"], "projects": _reels_meta(store),
+            "doc": _reels_find(store, store["active"])}
+
+
+def reels_state():
+    with _REELS_LOCK:
+        store = _reels_load_store()
+        _reels_write_store(store)     # persist ids assigned during normalize
+        return _reels_state(store)
+
+
+def reels_save(body):
+    """Save one project's doc (default: the active one) and make it active.
+    Returns the cleaned doc, or None for an unknown project id."""
+    with _REELS_LOCK:
+        store = _reels_load_store()
+        pid = str(body.get("project") or store["active"])
+        p = _reels_find(store, pid)
+        if p is None:
+            return None
+        doc = clean_reels(body)
+        doc.update({"id": p["id"], "name": p["name"], "created": p["created"],
+                    "modified": time.time()})
+        store["projects"][store["projects"].index(p)] = doc
+        store["active"] = pid
+        _reels_write_store(store)
+        return doc
+
+
+def reels_new(name):
+    with _REELS_LOCK:
+        store = _reels_load_store()
+        proj = _clean_project(
+            {"name": name or f"Reel {len(store['projects']) + 1}"})
+        store["projects"].append(proj)
+        store["active"] = proj["id"]
+        _reels_write_store(store)
+        return _reels_state(store)
+
+
+def reels_open(pid):
+    with _REELS_LOCK:
+        store = _reels_load_store()
+        if _reels_find(store, pid) is None:
+            return None
+        store["active"] = pid
+        _reels_write_store(store)
+        return _reels_state(store)
+
+
+def reels_rename(pid, name):
+    with _REELS_LOCK:
+        store = _reels_load_store()
+        p = _reels_find(store, pid)
+        if p is None or not str(name or "").strip():
+            return None
+        p["name"] = str(name).strip()[:80]
+        p["modified"] = time.time()
+        _reels_write_store(store)
+        return _reels_state(store)
+
+
+def reels_delete(pid):
+    with _REELS_LOCK:
+        store = _reels_load_store()
+        p = _reels_find(store, pid)
+        if p is None:
+            return None
+        store["projects"].remove(p)
+        if not store["projects"]:
+            store["projects"] = [_clean_project({"name": "Reel 1"})]
+        if store["active"] == pid:
+            store["active"] = store["projects"][0]["id"]
+        _reels_write_store(store)
+        return _reels_state(store)
 
 
 def clean_reels(raw):
@@ -509,16 +633,6 @@ def clean_reels(raw):
         marks.append(entry)
     marks.sort(key=lambda m: m["t"])
     doc["markers"] = marks
-    return doc
-
-
-def save_reels(raw):
-    doc = clean_reels(raw)
-    with _REELS_LOCK:
-        tmp = REELS_JSON + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(doc, f, indent=1)
-        os.replace(tmp, REELS_JSON)
     return doc
 
 
@@ -671,11 +785,12 @@ STYLES = {
         "needs": "ranked 'applause' regions (+ optional 'highlight' regions)",
     },
     "reels": {
+        # output filename is per-project (reel_<name>.mp4) — the job's "✓" line
+        # carries it, so no static "output" entry here.
         "label": "Reel (portrait 3-stack, compound cut)",
         "script": os.path.join(ROOT, "render", "style_reels.py"),
         "per_performance": False,
-        "output": "reel_3stack.mp4",
-        "needs": "a cut list from the reels interface (/reels.html)",
+        "needs": "a cut list from the reels interface (/reels.html); renders the open reel project",
     },
 }
 
@@ -1394,8 +1509,9 @@ class Handler(BaseHTTPRequestHandler):
             # Style regions (applause, highlight, …) — agent-friendly read.
             return self._send_json({"regions": db_load().get("regions", [])})
         if path == "/api/reels":
-            # Reels production interface document (segments + per-cam framing).
-            return self._send_json(load_reels())
+            # Reels production interface: project list + the active project's
+            # doc (segments + per-cam framing + markers).
+            return self._send_json(reels_state())
         if path == "/api/backups":
             return self._send_json({"backups": list_backups()})
         if path == "/api/camera-grades":
@@ -1532,18 +1648,56 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": False, "error": str(e)}, 500)
             return self._send_json({"ok": True, "clips": saved, "saved": SYNC_JSON})
         if path == "/api/reels":
-            # Full-document save from the reels interface (validated + clamped).
+            # Full-document save of one reel project (validated + clamped).
+            # Body: the doc fields + {"project": id}; omitted id = active.
             try:
                 body = self._read_json()
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 400)
             try:
-                saved = save_reels(body)
+                saved = reels_save(body)
             except ValueError as e:
                 return self._send_json({"ok": False, "error": str(e)}, 400)
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 500)
+            if saved is None:
+                return self._send_json({"ok": False, "error": "no such project"}, 404)
             return self._send_json({"ok": True, "doc": saved, "saved": REELS_JSON})
+        if path == "/api/reels/new":
+            # Create a reel project — starts from the ENTIRE show as one clip.
+            try:
+                body = self._read_json()
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            st = reels_new(str(body.get("name") or "").strip())
+            return self._send_json({"ok": True, **st})
+        if path == "/api/reels/open":
+            try:
+                pid = str(self._read_json().get("id") or "")
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            st = reels_open(pid)
+            if st is None:
+                return self._send_json({"ok": False, "error": "no such project"}, 404)
+            return self._send_json({"ok": True, **st})
+        if path == "/api/reels/rename":
+            try:
+                body = self._read_json()
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            st = reels_rename(str(body.get("id") or ""), body.get("name"))
+            if st is None:
+                return self._send_json({"ok": False, "error": "bad id or name"}, 400)
+            return self._send_json({"ok": True, **st})
+        if path == "/api/reels/delete":
+            try:
+                pid = str(self._read_json().get("id") or "")
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            st = reels_delete(pid)
+            if st is None:
+                return self._send_json({"ok": False, "error": "no such project"}, 404)
+            return self._send_json({"ok": True, **st})
         if path == "/api/titles":
             # Additive title API for the external agent: append one title (a bare
             # object) or many ({"titles":[...]}), without touching anything else.

@@ -39,6 +39,8 @@ const State = {
   saveTimer: null,
   exportTimer: null,
   color: null,                              // shared camera grades (loadGrades)
+  projects: [],                             // reel project metas {id,name,...}
+  projectId: null,                          // the open (active) project
 };
 
 const $ = (id) => document.getElementById(id);
@@ -83,20 +85,23 @@ function fmtSrc(t) {
 
 /* ---------- boot ---------- */
 async function boot() {
-  const [meta, doc] = await Promise.all([
+  const [meta, reels] = await Promise.all([
     api('/api/meta').then(r => r.json()),
     api('/api/reels').then(r => r.json()),
   ]);
   State.fps = meta.fps || 60;
   State.duration = meta.duration || 0;
-  State.doc = doc;
-  State.doc.markers = doc.markers || [];
+  State.projects = reels.projects || [];
+  State.projectId = reels.active;
+  State.doc = reels.doc;
+  State.doc.markers = State.doc.markers || [];
   const byId = {};
   for (const c of meta.clips) byId[c.id] = c;
-  State.clips = doc.layout.map(id => byId[id]).filter(Boolean);
+  State.clips = State.doc.layout.map(id => byId[id]).filter(Boolean);
 
   buildStage();
   buildCamRows();
+  buildProjectBar();
   loadGrades();
   layoutStage();
   setupTimeline();
@@ -658,24 +663,129 @@ function deleteSelected() {
 }
 
 /* ---------- persistence ---------- */
+async function doSave() {
+  clearTimeout(State.saveTimer);
+  State.saveTimer = null;
+  try {
+    const r = await api('/api/reels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        Object.assign({}, State.doc, { project: State.projectId })),
+    }).then(r => r.json());
+    if (!r.ok) throw new Error(r.error || 'save failed');
+    $('saveState').textContent = '✓ saved ' + new Date().toLocaleTimeString();
+    const meta = State.projects.find(p => p.id === State.projectId);
+    if (meta) { meta.segments = segs().length; meta.reel = outDur(); }
+  } catch (e) {
+    $('saveState').textContent = '⚠ save failed — ' + e.message;
+  }
+}
 function scheduleSave() {
   $('saveState').textContent = 'saving…';
   clearTimeout(State.saveTimer);
-  State.saveTimer = setTimeout(async () => {
-    try {
-      const r = await api('/api/reels', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(State.doc),
-      }).then(r => r.json());
-      if (!r.ok) throw new Error(r.error || 'save failed');
-      $('saveState').textContent =
-        '✓ saved ' + new Date().toLocaleTimeString();
-    } catch (e) {
-      $('saveState').textContent = '⚠ save failed — ' + e.message;
-    }
-  }, 500);
+  State.saveTimer = setTimeout(doSave, 500);
   updateStatus();
+}
+async function flushSave() {
+  if (State.saveTimer) await doSave();
+}
+
+/* ---------- reel projects ---------- */
+/* Each project is a complete independent cut of the show (segments, framing,
+   markers). "New" starts from the default doc: the ENTIRE show as one
+   compound clip. The open project is the server's `active` one — that's what
+   Export renders. */
+function refreshProjectSelect() {
+  const sel = $('projSelect');
+  sel.innerHTML = '';
+  for (const p of State.projects) {
+    const o = document.createElement('option');
+    o.value = p.id;
+    o.textContent = p.name;
+    sel.appendChild(o);
+  }
+  sel.value = State.projectId;
+}
+
+async function projectRequest(path, body) {
+  const r = await api(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  }).then(r => r.json());
+  if (!r.ok) throw new Error(r.error || 'request failed');
+  return r;
+}
+
+function applyProjectState(st) {
+  State.projects = st.projects || State.projects;
+  State.projectId = st.active;
+  loadDoc(st.doc);
+}
+
+/* Swap the whole editing state over to another project's doc. */
+function loadDoc(doc) {
+  pauseAll();
+  State.doc = doc;
+  State.doc.markers = doc.markers || [];
+  State.selected = -1;
+  State.selMarker = -1;
+  State.undoStack = [];
+  State._undoTag = null;
+  applyLayoutOrder();            // panes/rows follow the doc's layout + cams
+  fitView();
+  seekOut(0);
+  refreshProjectSelect();
+  invalidate();
+  updateStatus();
+  drawTl();
+  refreshExport();               // the Open button belongs to the new reel
+}
+
+function buildProjectBar() {
+  refreshProjectSelect();
+  $('projSelect').addEventListener('change', async (e) => {
+    const id = e.target.value;
+    try {
+      await flushSave();
+      applyProjectState(await projectRequest('/api/reels/open', { id }));
+    } catch (err) {
+      flashSave('⚠ ' + err.message);
+      refreshProjectSelect();
+    }
+  });
+  $('projNew').addEventListener('click', async () => {
+    const name = prompt(
+      'Name for the new reel (it starts with the entire show):',
+      `Reel ${State.projects.length + 1}`);
+    if (name === null) return;
+    try {
+      await flushSave();
+      applyProjectState(await projectRequest('/api/reels/new', { name }));
+      flashSave('✓ new reel — full show loaded');
+    } catch (err) { flashSave('⚠ ' + err.message); }
+  });
+  $('projRename').addEventListener('click', async () => {
+    const cur = State.projects.find(p => p.id === State.projectId);
+    const name = prompt('Rename this reel:', cur ? cur.name : '');
+    if (!name) return;
+    try {
+      const st = await projectRequest('/api/reels/rename',
+                                      { id: State.projectId, name });
+      State.projects = st.projects;
+      refreshProjectSelect();
+    } catch (err) { flashSave('⚠ ' + err.message); }
+  });
+  $('projDelete').addEventListener('click', async () => {
+    const cur = State.projects.find(p => p.id === State.projectId);
+    if (!confirm(`Delete reel "${cur ? cur.name : ''}"? Only its cut list is ` +
+                 'removed — the footage is untouched.')) return;
+    try {
+      applyProjectState(
+        await projectRequest('/api/reels/delete', { id: State.projectId }));
+    } catch (err) { flashSave('⚠ ' + err.message); }
+  });
 }
 function flashSave(msg) {
   $('saveState').textContent = msg;
@@ -756,6 +866,12 @@ function zoomView(f, cx) {
   v.span = clamp(v.span * f, 0.5, Math.max(1, outDur()));
   v.start = clamp(T - (T - v.start) * f, 0, Math.max(0, outDur() - v.span));
   invalidate();
+}
+/* ⌘+ / ⌘− zoom keeps the playhead anchored (falls back to view center). */
+function zoomAtPlayhead(f) {
+  const x = timeToX(phOut());
+  zoomView(f, x >= 0 && x <= Tl.w ? x : undefined);
+  drawTl();
 }
 
 /* ---------- markers + snapping ---------- */
@@ -1087,6 +1203,15 @@ function bindKeys() {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault(); undo(); return;
     }
+    if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) {
+      e.preventDefault(); zoomAtPlayhead(1 / 1.6); return;
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === '-' || e.key === '_')) {
+      e.preventDefault(); zoomAtPlayhead(1.6); return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === '0') {
+      e.preventDefault(); fitView(); drawTl(); return;
+    }
     if (e.metaKey || e.ctrlKey) return;
     switch (e.key) {
       case ' ':
@@ -1122,34 +1247,31 @@ function bindKeys() {
 /* ---------- export ---------- */
 function bindExport() {
   $('exportBtn').addEventListener('click', async () => {
-    // flush any pending edit first so the render sees the latest cut
-    clearTimeout(State.saveTimer);
     try {
-      await api('/api/reels', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(State.doc),
-      });
+      // flush the latest cut AND make this project the active one — the
+      // render script exports the store's active project
+      await doSave();
       const r = await api('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ style: 'reels' }),
       }).then(r => r.json());
       if (!r.ok) throw new Error(r.error || 'export failed');
-      $('saveState').textContent = '✓ saved';
       pollExport();
     } catch (e) {
       flashSave('⚠ export failed — ' + e.message);
     }
   });
   $('openBtn').addEventListener('click', () => {
+    const file = $('openBtn').dataset.file;
+    if (!file) return;
     api('/api/open', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: 'reel_3stack.mp4' }),
+      body: JSON.stringify({ file }),
     });
   });
-  refreshExport();  // show ▶ Open if a reel already exists on disk
+  refreshExport();  // show ▶ Open if this reel finished rendering earlier
 }
 
 async function refreshExport() {
@@ -1169,7 +1291,11 @@ async function refreshExport() {
     btn.disabled = false;
     btn.textContent = '🎬 Export reel';
     if (job && job.status === 'error') flashSave('⚠ render failed — ' + (job.error || ''));
-    $('openBtn').hidden = !me.output;
+    // output filename is per-project (reel_<name>.mp4) — take it from the
+    // finished job's "✓" line rather than a fixed name
+    const file = (job && job.status === 'done' && job.file) || null;
+    $('openBtn').hidden = !file;
+    if (file) $('openBtn').dataset.file = file;
     return false;
   } catch (e) { return false; }
 }

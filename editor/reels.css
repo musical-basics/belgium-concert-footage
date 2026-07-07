@@ -7,6 +7,9 @@
 }
 #backLink:hover { border-color: var(--accent); color: var(--text); }
 
+.projlbl { color: var(--muted); display: flex; align-items: center; gap: 6px; }
+#projSelect { max-width: 220px; }
+
 #reelsMain { flex: 1; display: flex; flex-direction: row; overflow: hidden; padding: 10px 14px; gap: 14px; }
 
 /* ---- portrait preview stage ---- */
