@@ -838,7 +838,7 @@ function setupTimeline() {
   resizeTl();
   Tl.cvs.addEventListener('mousedown', tlDown);
   window.addEventListener('mousemove', tlMove);
-  window.addEventListener('mouseup', () => { Tl.drag = null; State._undoTag = null; });
+  window.addEventListener('mouseup', tlUp);
   Tl.cvs.addEventListener('mouseleave', () => { Tl.hoverX = null; });
   Tl.cvs.addEventListener('wheel', tlWheel, { passive: false });
   $('zoomFit').addEventListener('click', () => { fitView(); drawTl(); });
@@ -1073,6 +1073,33 @@ function drawTl() {
     ctx.fillText(label, lx, 26);
   }
 
+  // move-drag: insertion caret at the nearest cut + a ghost of the clip
+  if (Tl.drag && Tl.drag.mode === 'move') {
+    const i = Tl.drag.idx, s = segs()[i], d = s.out - s.in;
+    const k = moveTarget();
+    let a = 0;
+    for (let j = 0; j < k; j++) a += segs()[j].out - segs()[j].in;
+    const cx = timeToX(a);
+    ctx.strokeStyle = '#f5c518';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(cx, 12); ctx.lineTo(cx, H); ctx.stroke();
+    ctx.fillStyle = '#f5c518';
+    ctx.beginPath();
+    ctx.moveTo(cx - 6, 12); ctx.lineTo(cx + 6, 12); ctx.lineTo(cx, 20);
+    ctx.closePath(); ctx.fill();
+    ctx.lineWidth = 1;
+    const gw = clamp(d / State.view.span * W, 26, 200);
+    const gx = clamp(Tl.drag.x - gw / 2, 0, W - gw);
+    ctx.fillStyle = 'rgba(79,140,255,0.30)';
+    ctx.fillRect(gx, 28, gw, H - 42);
+    ctx.strokeStyle = '#4f8cff';
+    ctx.strokeRect(gx + 0.5, 28.5, gw - 1, H - 43);
+    ctx.fillStyle = '#e6e9ef';
+    ctx.font = '10px ui-monospace, Menlo, monospace';
+    const at = k > i ? k : k + 1;
+    ctx.fillText(`clip ${i + 1} (${d.toFixed(1)}s) → position ${at}`, gx + 5, 41);
+  }
+
   // playhead
   const px = timeToX(phOut());
   if (px >= 0 && px <= W) {
@@ -1128,6 +1155,7 @@ function tlDown(e) {
     return;
   }
   const hit = hitTest(x);
+  const onPlayhead = Math.abs(timeToX(phOut()) - x) <= 6;
   if (hit && hit.edge) {
     pushUndo();
     State.selected = hit.idx;
@@ -1135,6 +1163,13 @@ function tlDown(e) {
     const s = segs()[hit.idx];
     Tl.drag = { mode: 'trim', idx: hit.idx, edge: hit.edge, lastX: x,
                 val: hit.edge === 'in' ? s.in : s.out };
+  } else if (hit && y > 20 && !onPlayhead) {
+    // block body: click = select + seek; dragging >5px turns into a MOVE
+    // (reorder). Scrub-drags live on the ruler strip or the playhead itself.
+    State.selected = hit.idx;
+    State.selMarker = -1;
+    seekOut(snapOut(xToTime(x), e.shiftKey));
+    Tl.drag = { mode: 'maybemove', idx: hit.idx, startX: x, x };
   } else {
     State.selected = hit ? hit.idx : -1;
     State.selMarker = -1;
@@ -1146,16 +1181,66 @@ function tlDown(e) {
   drawTl();
 }
 
+/* Cut boundary nearest the move-drag cursor = the insertion point (0..n). */
+function moveTarget() {
+  const T = xToTime(Tl.drag.x);
+  let a = 0, best = 0, bd = Infinity;
+  for (let k = 0; k <= segs().length; k++) {
+    const dd = Math.abs(T - a);
+    if (dd < bd) { bd = dd; best = k; }
+    if (k < segs().length) a += segs()[k].out - segs()[k].in;
+  }
+  return best;
+}
+
+/* Move the segment at `i` so it sits at insertion boundary `k`; keeps the
+   playhead on the moved clip. Shared by drag-drop and the [ ] keys. */
+function commitMove(i, k) {
+  if (k === i || k === i + 1) return false;      // dropping where it already is
+  pushUndo();
+  const [seg] = segs().splice(i, 1);
+  const at = k > i ? k - 1 : k;
+  segs().splice(at, 0, seg);
+  State.selected = at;
+  seekSrc(at, clamp(State.ph.srcT, seg.in, seg.out));
+  invalidate();
+  scheduleSave();
+  updateStatus();
+  drawTl();
+  return true;
+}
+
+function moveSelected(dir) {
+  const i = State.selected;
+  if (i < 0) return;
+  if (dir > 0 ? i >= segs().length - 1 : i <= 0) return;
+  commitMove(i, dir > 0 ? i + 2 : i - 1);
+}
+
+function tlUp() {
+  const d = Tl.drag;
+  Tl.drag = null;
+  State._undoTag = null;
+  if (d && d.mode === 'move') {
+    commitMove(d.idx, moveTarget());
+    drawTl();
+  }
+}
+
 function tlMove(e) {
   const rect = Tl.cvs.getBoundingClientRect();
   const x = e.clientX - rect.left;
   if (!Tl.drag) {
     if (e.target === Tl.cvs) {
       Tl.hoverX = x;
+      const y = e.clientY - rect.top;
       const hit = hitTest(x);
-      const mk = markerHit(x, e.clientY - rect.top);
+      const mk = markerHit(x, y);
       Tl.cvs.style.cursor =
-        mk ? 'pointer' : hit && hit.edge ? 'col-resize' : 'crosshair';
+        mk ? 'pointer'
+        : hit && hit.edge ? 'col-resize'
+        : hit && y > 20 ? 'grab'
+        : 'crosshair';
     } else {
       Tl.hoverX = null;
     }
@@ -1164,6 +1249,15 @@ function tlMove(e) {
   if (Tl.drag.mode === 'scrub') {
     seekOut(snapOut(xToTime(clamp(x, 0, Tl.w)), e.shiftKey));
     return;
+  }
+  if (Tl.drag.mode === 'maybemove') {
+    if (Math.abs(x - Tl.drag.startX) < 5) return;
+    Tl.drag = { mode: 'move', idx: Tl.drag.idx, x };
+    Tl.cvs.style.cursor = 'grabbing';
+  }
+  if (Tl.drag.mode === 'move') {
+    Tl.drag.x = clamp(x, 0, Tl.w);
+    return;               // ghost + insertion caret drawn by drawTl
   }
   // trim: accumulate the drag in unsnapped space (drag.val) and snap the
   // candidate each move — sticky near markers but still escapable
@@ -1226,6 +1320,10 @@ function bindKeys() {
         splitAtPlayhead(); break;
       case 'm': case 'M':
         addMarkerAtPlayhead(); break;
+      case '[':
+        moveSelected(-1); break;
+      case ']':
+        moveSelected(1); break;
       case 'Backspace': case 'Delete':
         e.preventDefault();
         if (State.selMarker >= 0) deleteSelectedMarker();
