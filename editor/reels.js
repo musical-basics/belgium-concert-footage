@@ -672,14 +672,41 @@ function bindTitleDrag() {
   block.addEventListener('pointercancel', end);
 }
 
+/* Default STYLING (position/size/wrap, not text/timing) for new titles.
+   Persisted per-device in localStorage; "Save as default" on a title card
+   overwrites it, so the next Create title inherits that look. */
+const TITLE_DEFAULT_KEY = 'reels.titleDefault';
+function titleStyleDefault() {
+  const base = { x: TITLE_DEF_X, y: TITLE_DEF_Y, scale: 1, wrap: true };
+  try {
+    const d = JSON.parse(localStorage.getItem(TITLE_DEFAULT_KEY) || 'null');
+    if (d && typeof d === 'object') {
+      return {
+        x: typeof d.x === 'number' ? clamp(d.x, 0, 1) : base.x,
+        y: typeof d.y === 'number' ? clamp(d.y, 0, 1) : base.y,
+        scale: typeof d.scale === 'number' ? clamp(d.scale, 0.4, 3) : base.scale,
+        wrap: d.wrap !== false,
+      };
+    }
+  } catch (e) { /* ignore */ }
+  return base;
+}
+function saveTitleDefault(t) {
+  const d = { x: t.x == null ? TITLE_DEF_X : t.x, y: t.y == null ? TITLE_DEF_Y : t.y,
+              scale: t.scale || 1, wrap: t.wrap !== false };
+  localStorage.setItem(TITLE_DEFAULT_KEY, JSON.stringify(d));
+  return d;
+}
+
 function addTitle() {
   pushUndo('add title');
   const dur = outDur();
   const t = clamp(phOut(), 0, dur);          // reel-time position
   let tin = t, tout = Math.min(dur, t + TITLE_DEFAULT_LEN);
   if (tout - tin < 1) tin = Math.max(0, tout - TITLE_DEFAULT_LEN);
+  const def = titleStyleDefault();           // inherit saved styling
   const title = { text: 'Title', subtitle: '', in: +tin.toFixed(3), out: +tout.toFixed(3),
-                  x: TITLE_DEF_X, y: TITLE_DEF_Y, scale: 1, wrap: true };
+                  x: def.x, y: def.y, scale: def.scale, wrap: def.wrap };
   titles().push(title);
   titles().sort((a, b) => a.in - b.in);
   State.selTitle = titles().indexOf(title);
@@ -750,6 +777,7 @@ function renderTitles() {
       `<span class="tscale">${Math.round((t.scale || 1) * 100)}%</span>` +
       `<button class="small" data-act="finc">A+</button></span>` +
       `<span class="rowbtns">` +
+      `<button class="small" data-act="savedef" title="Save this title's position, size &amp; wrap as the default for new titles">☆ Default</button>` +
       `<button class="small" data-act="center" title="Recenter (reset position)">⌖</button>` +
       `<button class="small danger" data-act="del" title="Delete">✕</button></span>`;
     const [txt, sub] = li.querySelectorAll('.ttext');
@@ -783,6 +811,12 @@ function renderTitles() {
       e.stopPropagation(); pushUndo('toggle title wrap');
       t.wrap = e.target.checked; invalidate(); scheduleSave();
     });
+    li.querySelector('[data-act=savedef]').onclick = (e) => {
+      e.stopPropagation();
+      const d = saveTitleDefault(t);
+      flashSave(`✓ default set: ${Math.round(d.x * 100)}% / ${Math.round(d.y * 100)}% · ` +
+                `${Math.round(d.scale * 100)}% · wrap ${d.wrap ? 'on' : 'off'}`);
+    };
     li.querySelector('[data-act=center]').onclick = (e) => {
       e.stopPropagation(); pushUndo('recenter title');
       t.x = TITLE_DEF_X; t.y = TITLE_DEF_Y; scheduleSave();
