@@ -33,6 +33,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import render as R   # sources, grades, encoder, audio bed, run()
+try:
+    import title_image as TI   # Pillow renderer for emoji titles (optional)
+except Exception:
+    TI = None                  # no Pillow -> emoji titles fall back to drawtext
 
 ROOT = R.ROOT
 OUT_DIR = R.OUT_DIR
@@ -73,6 +77,8 @@ def title_filter(titles, work_dir, gscale, pw, ph):
              f"bordercolor=black@0.9:shadowcolor=black@0.55:shadowx=2:shadowy=3")
     parts = []
     for n, ttl in enumerate(titles):
+        if TI and TI.title_needs_image(ttl):
+            continue                       # emoji title -> image overlay, not drawtext
         a = max(0.0, float(ttl["in"]))
         b = float(ttl["out"])
         if b - a <= 0.05:
@@ -108,6 +114,27 @@ def title_filter(titles, work_dir, gscale, pw, ph):
             parts.append(f"drawtext=textfile='{tf}':{style}:fontsize={fs_sub}:"
                          f"y={round(sy0 + li * lh_sub)}:{tail}")
     return ",".join(parts)
+
+
+def emoji_title_pngs(titles, work_dir, gscale, pw, ph):
+    """Render each EMOJI title (color emoji can't go through drawtext) to a full
+    -frame transparent PNG. Returns [{png, a, b, fd}] for the caller to overlay
+    with the matching fade/enable timing. Empty if none / no Pillow."""
+    if not TI:
+        return []
+    out = []
+    for n, ttl in enumerate(titles):
+        if not TI.title_needs_image(ttl):
+            continue
+        a = max(0.0, float(ttl["in"]))
+        b = float(ttl["out"])
+        if b - a <= 0.05:
+            continue
+        png = os.path.join(work_dir, f"ttl_emoji_{n}.png")
+        TI.render_title_png(ttl, png, pw, ph, gscale)
+        out.append({"png": png, "a": a, "b": b,
+                    "fd": min(0.4, max(0.05, (b - a) / 2))})
+    return out
 
 
 def _wrap(text, max_chars, wrap=True):
@@ -260,15 +287,40 @@ def main():
             af_.write(f"file '{os.path.abspath(aout)}'\n")
             print(f"    cut seg {k+1}/{len(segs)}   ")
 
-    # Concat the graded segments. If there are titles, burn them in one pass
-    # over the whole reel (OUTPUT time) — that's what makes a title independent
-    # of the clips beneath it (no per-clip duplication, no cut clipping).
+    # Concat the graded segments. Titles burn in one pass over the whole reel
+    # (OUTPUT time) — independent of the clips beneath. Plain titles go through
+    # drawtext; titles containing color emoji are pre-rendered to PNGs (drawtext
+    # can't draw color emoji) and overlaid with the same fade/enable timing.
     tvf = title_filter(titles, seg_dir, tscale, pw, ph)
+    emojis = emoji_title_pngs(titles, seg_dir, tscale, pw, ph)
     video_only = os.path.join(seg_dir, "video.mp4")
-    if tvf:
-        R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-               "-f", "concat", "-safe", "0", "-i", vlist,
-               "-vf", tvf, *enc, "-r", str(R.FPS), "-g", str(R.FPS),
+    if tvf or emojis:
+        reel_dur = sum(float(s["out"]) - float(s["in"]) for s in segs)
+        inputs = ["-f", "concat", "-safe", "0", "-i", vlist]
+        for e in emojis:
+            # loop the static PNG into a stream bounded to the reel length so it
+            # ends cleanly (an unbounded -loop never terminates)
+            inputs += ["-loop", "1", "-t", f"{reel_dur:.3f}", "-i", e["png"]]
+        # build filter_complex: [0:v] -> optional drawtext -> chain of overlays
+        chain = f"[0:v]{tvf}[bg0]" if tvf else "[0:v]null[bg0]"
+        parts = [chain]
+        cur = "bg0"
+        for i, e in enumerate(emojis):
+            a, b, fd = e["a"], e["b"], e["fd"]
+            # the looped image runs on the output clock, so fade its alpha in at
+            # `a` and out at `b-fd` to match the text ramp; overlay `enable`
+            # gates it to [a,b]. (No setpts — it desyncs the loop's clock.)
+            fade = (f"[{i + 1}:v]format=yuva420p,"
+                    f"fade=t=in:st={a:.3f}:d={fd:.3f}:alpha=1,"
+                    f"fade=t=out:st={b - fd:.3f}:d={fd:.3f}:alpha=1[e{i}]")
+            parts.append(fade)
+            nxt = f"v{i}" if i < len(emojis) - 1 else "vout"
+            parts.append(f"[{cur}][e{i}]overlay=0:0:enable='between(t,{a:.3f},{b:.3f})'[{nxt}]")
+            cur = nxt
+        fc = ";".join(parts)
+        R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
+               "-filter_complex", fc, "-map", "[vout]" if emojis else "[bg0]",
+               *enc, "-r", str(R.FPS), "-g", str(R.FPS), "-shortest",
                "-write_tmcd", "0", "-video_track_timescale", "60000",
                video_only])
     else:
