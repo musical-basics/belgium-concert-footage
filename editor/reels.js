@@ -37,6 +37,7 @@ const State = {
   wave: { ready: false, peaks: null, pps: 100 },
   undoStack: [],
   saveTimer: null,
+  dirty: false,                             // unsaved edits pending
   exportTimer: null,
   color: null,                              // shared camera grades (loadGrades)
   projects: [],                             // reel project metas {id,name,...}
@@ -110,10 +111,23 @@ async function boot() {
   bindTransport();
   bindKeys();
   bindExport();
+  bindSave();
   seekOut(0);
   updateStatus();
+  setSaveBtn('saved');
   requestAnimationFrame(tick);
   window.addEventListener('resize', () => { layoutStage(); resizeTl(); drawTl(); });
+}
+
+function bindSave() {
+  $('saveBtn').addEventListener('click', () => { doSave(); });
+  // Flush pending edits when the tab is closed/reloaded or backgrounded, so a
+  // cut made in the last fraction of a second before a refresh isn't lost.
+  window.addEventListener('beforeunload', beaconSave);
+  window.addEventListener('pagehide', beaconSave);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') beaconSave();
+  });
 }
 
 function updateStatus() {
@@ -671,32 +685,74 @@ function deleteSelected() {
 }
 
 /* ---------- persistence ---------- */
+function savePayload() {
+  return JSON.stringify(Object.assign({}, State.doc, { project: State.projectId }));
+}
+function setSaveBtn(state) {
+  // state: 'dirty' | 'saving' | 'saved' | 'error'
+  const btn = $('saveBtn');
+  if (!btn) return;
+  btn.classList.toggle('dirty', state === 'dirty');
+  btn.disabled = state === 'saving';
+  btn.textContent =
+    state === 'saving' ? '💾 Saving…'
+    : state === 'dirty' ? '💾 Save •'
+    : state === 'error' ? '⚠ Save'
+    : '✓ Saved';
+}
 async function doSave() {
   clearTimeout(State.saveTimer);
   State.saveTimer = null;
+  State.dirty = false;
+  setSaveBtn('saving');
+  $('saveState').textContent = 'saving…';
   try {
     const r = await api('/api/reels', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(
-        Object.assign({}, State.doc, { project: State.projectId })),
+      body: savePayload(),
     }).then(r => r.json());
     if (!r.ok) throw new Error(r.error || 'save failed');
     $('saveState').textContent = '✓ saved ' + new Date().toLocaleTimeString();
+    setSaveBtn(State.dirty ? 'dirty' : 'saved');   // dirtied again mid-request?
     const meta = State.projects.find(p => p.id === State.projectId);
     if (meta) { meta.segments = segs().length; meta.reel = outDur(); }
   } catch (e) {
+    State.dirty = true;                            // keep it pending on failure
+    setSaveBtn('error');
     $('saveState').textContent = '⚠ save failed — ' + e.message;
   }
 }
 function scheduleSave() {
+  State.dirty = true;
+  setSaveBtn('dirty');
   $('saveState').textContent = 'saving…';
   clearTimeout(State.saveTimer);
-  State.saveTimer = setTimeout(doSave, 500);
+  State.saveTimer = setTimeout(doSave, 300);
   updateStatus();
 }
 async function flushSave() {
-  if (State.saveTimer) await doSave();
+  if (State.saveTimer || State.dirty) await doSave();
+}
+/* Last-ditch save when the tab is being closed/hidden. fetch() won't reliably
+   finish during unload, so use sendBeacon (fire-and-forget, survives unload).
+   The server accepts the same JSON body on POST /api/reels. */
+function beaconSave() {
+  if (!State.dirty && !State.saveTimer) return;
+  clearTimeout(State.saveTimer);
+  State.saveTimer = null;
+  try {
+    const blob = new Blob([savePayload()], { type: 'application/json' });
+    if (navigator.sendBeacon('/api/reels', blob)) { State.dirty = false; return; }
+  } catch (e) { /* fall through */ }
+  // sendBeacon unavailable/blocked — try a synchronous XHR as a last resort
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/reels', false);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(savePayload());
+    State.dirty = false;
+  } catch (e) { /* nothing more we can do */ }
 }
 
 /* ---------- reel projects ---------- */
@@ -1319,6 +1375,10 @@ function tlWheel(e) {
 /* ---------- keys ---------- */
 function bindKeys() {
   document.addEventListener('keydown', (e) => {
+    // ⌘S always saves, even from a form field.
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault(); doSave(); return;
+    }
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
