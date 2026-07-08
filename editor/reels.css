@@ -17,6 +17,19 @@
 #stage .title-overlay { inset: 0; left: 0; top: 0; width: 100%; height: 100%; z-index: 5; }
 .tfont-global { color: var(--muted); display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
 #titleList { margin-top: 6px; }
+/* multi-line title inputs */
+#titleList li textarea.ttext {
+  resize: none; overflow: hidden; min-height: 26px; line-height: 1.35;
+  font-family: inherit; white-space: pre-wrap;
+}
+#titleList li .trow {
+  display: flex; align-items: center; gap: 10px; justify-content: space-between;
+}
+#titleList li .twrap {
+  display: inline-flex; align-items: center; gap: 4px; color: var(--muted);
+  font-size: 11px; cursor: pointer; user-select: none; flex: 0 0 auto;
+}
+#titleList li .twrap input { margin: 0; }
 
 #reelsMain { flex: 1; display: flex; flex-direction: row; overflow: hidden; padding: 10px 14px; gap: 14px; }
 

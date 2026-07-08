@@ -88,8 +88,9 @@ def title_filter(titles, work_dir, gscale, pw, ph):
                  f"(t-{a:.3f})/{fd:.3f},if(lt(t,{b - fd:.3f}),1,"
                  f"if(lt(t,{b:.3f}),({b:.3f}-t)/{fd:.3f},0))))'")
         tail = f"x={x_expr}:enable='between(t,{a:.3f},{b:.3f})':{alpha}"
-        mains = _wrap((ttl.get("text") or "").strip(), max(6, round(40 / s)))
-        subs = _wrap((ttl.get("subtitle") or "").strip(), max(8, round(56 / s)))
+        wrap = ttl.get("wrap") is not False        # default on
+        mains = _wrap(ttl.get("text") or "", max(6, round(40 / s)), wrap)
+        subs = _wrap(ttl.get("subtitle") or "", max(8, round(56 / s)), wrap)
         gap = fs_main * 0.5 if (mains and subs) else 0
         block_h = len(mains) * lh_main + gap + len(subs) * lh_sub
         y0 = cy * ph - block_h / 2
@@ -109,19 +110,30 @@ def title_filter(titles, work_dir, gscale, pw, ph):
     return ",".join(parts)
 
 
-def _wrap(text, max_chars):
-    if not text:
+def _wrap(text, max_chars, wrap=True):
+    """Lay out text into lines. Explicit '\\n' breaks are always honored; when
+    `wrap` is on, each such line is additionally word-wrapped at max_chars.
+    Blank lines are dropped (nothing to draw)."""
+    text = (text or "").replace("\r", "")
+    if not text.strip():
         return []
-    lines, cur = [], ""
-    for word in text.split():
-        if cur and len(cur) + 1 + len(word) > max_chars:
-            lines.append(cur)
-            cur = word
-        else:
-            cur = f"{cur} {word}" if cur else word
-    if cur:
-        lines.append(cur)
-    return lines
+    out = []
+    for raw in text.split("\n"):
+        if not raw.strip():
+            continue
+        if not wrap:
+            out.append(raw.strip())
+            continue
+        cur = ""
+        for word in raw.split():
+            if cur and len(cur) + 1 + len(word) > max_chars:
+                out.append(cur)
+                cur = word
+            else:
+                cur = f"{cur} {word}" if cur else word
+        if cur:
+            out.append(cur)
+    return out
 
 
 def cam_chain(cam, transform, pane_w, pane_h):

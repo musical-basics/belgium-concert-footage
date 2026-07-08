@@ -813,6 +813,7 @@ def clean_reels(raw):
             entry["scale"] = max(0.4, min(3.0, float(t.get("scale", 1.0))))
         except (TypeError, ValueError):
             entry["scale"] = 1.0
+        entry["wrap"] = bool(t.get("wrap", True))    # auto-wrap long lines
         titles.append(entry)
     titles.sort(key=lambda t: t["in"])
     doc["titles"] = titles

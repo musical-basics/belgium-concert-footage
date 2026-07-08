@@ -568,14 +568,25 @@ function buildColorRows() {
 function titles() { return State.doc.titles; }
 function titleScale() { return State.doc.title_scale || 1; }
 
-function wrapText(s, max) {
-  const lines = []; let cur = '';
-  for (const w of (s || '').split(/\s+/).filter(Boolean)) {
-    if (cur && (cur.length + 1 + w.length) > max) { lines.push(cur); cur = w; }
-    else cur = cur ? `${cur} ${w}` : w;
+/* Lay out title text into lines. When wrap is on, auto-wrap on word
+   boundaries at `max` chars, wrapping each explicit line independently (so
+   manual breaks are always kept). When wrap is off, honor the text verbatim —
+   only the newlines the user typed. */
+function wrapText(s, max, wrap = true) {
+  const rawLines = (s || '').replace(/\r/g, '').split('\n');
+  if (!wrap) return rawLines.join('\n');
+  const out = [];
+  for (const raw of rawLines) {
+    const words = raw.split(/\s+/).filter(Boolean);
+    if (!words.length) { out.push(''); continue; }
+    let cur = '';
+    for (const w of words) {
+      if (cur && (cur.length + 1 + w.length) > max) { out.push(cur); cur = w; }
+      else cur = cur ? `${cur} ${w}` : w;
+    }
+    if (cur) out.push(cur);
   }
-  if (cur) lines.push(cur);
-  return lines.join('\n');
+  return out.join('\n');
 }
 
 /* The title whose reel window contains the playhead's output time (topmost
@@ -604,10 +615,11 @@ function updateTitleOverlay() {
   const cx = active.x == null ? TITLE_DEF_X : active.x;
   const cy = active.y == null ? TITLE_DEF_Y : active.y;
   const es = titleScale() * (active.scale || 1);
+  const wrap = active.wrap !== false;             // default on
   const main = box.querySelector('.to-main'), sub = box.querySelector('.to-sub');
-  main.textContent = wrapText(active.text || '', Math.max(6, Math.round(TITLE_MAIN_MAX_CHARS / es)));
+  main.textContent = wrapText(active.text || '', Math.max(6, Math.round(TITLE_MAIN_MAX_CHARS / es)), wrap);
   main.style.display = (active.text || '').trim() ? '' : 'none';
-  sub.textContent = wrapText(active.subtitle || '', Math.max(8, Math.round(TITLE_SUB_MAX_CHARS / es)));
+  sub.textContent = wrapText(active.subtitle || '', Math.max(8, Math.round(TITLE_SUB_MAX_CHARS / es)), wrap);
   sub.style.display = (active.subtitle || '').trim() ? '' : 'none';
   // fonts in OUTPUT pixels — the stage scale() transform shrinks to screen
   main.style.fontSize = (OUT_H / 16 * es) + 'px';
@@ -664,7 +676,7 @@ function addTitle() {
   let tin = t, tout = Math.min(dur, t + TITLE_DEFAULT_LEN);
   if (tout - tin < 1) tin = Math.max(0, tout - TITLE_DEFAULT_LEN);
   const title = { text: 'Title', subtitle: '', in: +tin.toFixed(3), out: +tout.toFixed(3),
-                  x: TITLE_DEF_X, y: TITLE_DEF_Y, scale: 1 };
+                  x: TITLE_DEF_X, y: TITLE_DEF_Y, scale: 1, wrap: true };
   titles().push(title);
   titles().sort((a, b) => a.in - b.in);
   State.selTitle = titles().indexOf(title);
@@ -718,12 +730,17 @@ function renderTitles() {
     const li = document.createElement('li');
     li.className = i === State.selTitle ? 'sel' : '';
     li.dataset.i = i;
+    const wrapOn = t.wrap !== false;
     li.innerHTML =
       `<span class="tnum">${i + 1}</span>` +
       `<span class="tmeta">` +
-      `<input class="ttext" type="text" placeholder="Title text" value="${esc(t.text)}" />` +
-      `<input class="ttext tsub" type="text" placeholder="Subtitle (optional)" value="${esc(t.subtitle)}" />` +
+      `<textarea class="ttext" rows="1" placeholder="Title text (Enter = line break)">${esc(t.text)}</textarea>` +
+      `<textarea class="ttext tsub" rows="1" placeholder="Subtitle (optional)">${esc(t.subtitle)}</textarea>` +
+      `<span class="trow">` +
+      `<label class="twrap" title="Auto-wrap long lines. Off = keep your exact line breaks.">` +
+      `<input type="checkbox" data-act="wrap" ${wrapOn ? 'checked' : ''} /> wrap</label>` +
       `<span class="ttime">reel ${fmtOut(t.in)} → ${fmtOut(t.out)} · ${(t.out - t.in).toFixed(1)}s</span>` +
+      `</span>` +
       `</span>` +
       `<span class="tfont" title="Title font size (this title)">` +
       `<button class="small" data-act="fdec">A−</button>` +
@@ -734,6 +751,9 @@ function renderTitles() {
       `<button class="small danger" data-act="del" title="Delete">✕</button></span>`;
     const [txt, sub] = li.querySelectorAll('.ttext');
     const scaleEl = li.querySelector('.tscale');
+    // grow textareas to fit their content
+    const autosize = (el) => { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; };
+    autosize(txt); autosize(sub);
     const bump = (d) => {
       pushUndo();
       t.scale = Math.round(clamp((t.scale || 1) + d, 0.4, 3) * 100) / 100;
@@ -754,8 +774,12 @@ function renderTitles() {
     txt.onclick = sub.onclick = (e) => e.stopPropagation();
     txt.addEventListener('focus', selQuiet);
     sub.addEventListener('focus', selQuiet);
-    txt.addEventListener('input', () => { t.text = txt.value; invalidate(); scheduleSave(); drawTl(); });
-    sub.addEventListener('input', () => { t.subtitle = sub.value; scheduleSave(); });
+    txt.addEventListener('input', () => { t.text = txt.value; autosize(txt); invalidate(); scheduleSave(); drawTl(); });
+    sub.addEventListener('input', () => { t.subtitle = sub.value; autosize(sub); scheduleSave(); });
+    li.querySelector('[data-act=wrap]').addEventListener('change', (e) => {
+      e.stopPropagation(); pushUndo();
+      t.wrap = e.target.checked; invalidate(); scheduleSave();
+    });
     li.querySelector('[data-act=center]').onclick = (e) => {
       e.stopPropagation(); pushUndo();
       t.x = TITLE_DEF_X; t.y = TITLE_DEF_Y; scheduleSave();
