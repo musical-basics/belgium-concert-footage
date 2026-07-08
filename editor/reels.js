@@ -121,6 +121,16 @@ async function boot() {
 
 function bindSave() {
   $('saveBtn').addEventListener('click', () => { doSave(); });
+  // ⌘S / Ctrl+S -> save. Registered on window in the CAPTURE phase so it wins
+  // before the browser's own "Save Page" default (which otherwise steals it,
+  // and before any per-widget handler). This is the reliable place for it.
+  window.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault();
+      e.stopPropagation();
+      doSave();
+    }
+  }, true);
   // Flush pending edits when the tab is closed/reloaded or backgrounded, so a
   // cut made in the last fraction of a second before a refresh isn't lost.
   window.addEventListener('beforeunload', beaconSave);
@@ -1375,10 +1385,7 @@ function tlWheel(e) {
 /* ---------- keys ---------- */
 function bindKeys() {
   document.addEventListener('keydown', (e) => {
-    // ⌘S always saves, even from a form field.
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
-      e.preventDefault(); doSave(); return;
-    }
+    // ⌘S is handled by a window capture-phase listener in bindSave().
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
