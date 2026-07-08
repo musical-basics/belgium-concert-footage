@@ -66,19 +66,20 @@ def probe_dims(path):
 
 
 def title_filter(titles, work_dir, gscale, pw, ph):
-    """drawtext chain for all titles, in OUTPUT (reel) time.
+    """drawtext chain for titles, in OUTPUT (reel) time — FALLBACK path only.
 
+    When Pillow is available every title renders via render/title_image.py (one
+    consistent renderer for plain + emoji titles). This drawtext path is used
+    only when Pillow is missing, so titles still burn in (minus color emoji).
     Titles live on the reel clock — a title is 'show this text from reel-time
-    in..out', independent of the clips beneath it. So this runs once over the
-    final concatenated reel (not per segment). fontsize and vertical layout use
-    the reel height `ph` (1920); x/y are normalized over the reel frame. '' when
-    there are no titles."""
+    in..out'. fontsize/layout use the reel height `ph`; x/y are normalized. ''
+    when there are no titles."""
     style = (f"fontfile='{R.TITLE_FONT}':fontcolor=white:borderw=4:"
              f"bordercolor=black@0.9:shadowcolor=black@0.55:shadowx=2:shadowy=3")
     parts = []
     for n, ttl in enumerate(titles):
-        if TI and TI.title_needs_image(ttl):
-            continue                       # emoji title -> image overlay, not drawtext
+        if TI:
+            continue                       # Pillow handles every title as an image
         a = max(0.0, float(ttl["in"]))
         b = float(ttl["out"])
         if b - a <= 0.05:
@@ -116,21 +117,21 @@ def title_filter(titles, work_dir, gscale, pw, ph):
     return ",".join(parts)
 
 
-def emoji_title_pngs(titles, work_dir, gscale, pw, ph):
-    """Render each EMOJI title (color emoji can't go through drawtext) to a full
-    -frame transparent PNG. Returns [{png, a, b, fd}] for the caller to overlay
-    with the matching fade/enable timing. Empty if none / no Pillow."""
+def title_pngs(titles, work_dir, gscale, pw, ph):
+    """Render EVERY title to a full-frame transparent PNG with Pillow — one
+    renderer for plain and emoji titles alike, so the export is consistent.
+    Returns [{png, a, b, fd}] for the caller to overlay with matching
+    fade/enable timing. Empty if Pillow is unavailable (then title_filter's
+    drawtext fallback draws the plain titles instead)."""
     if not TI:
         return []
     out = []
     for n, ttl in enumerate(titles):
-        if not TI.title_needs_image(ttl):
-            continue
         a = max(0.0, float(ttl["in"]))
         b = float(ttl["out"])
         if b - a <= 0.05:
             continue
-        png = os.path.join(work_dir, f"ttl_emoji_{n}.png")
+        png = os.path.join(work_dir, f"ttl_{n}.png")
         TI.render_title_png(ttl, png, pw, ph, gscale)
         out.append({"png": png, "a": a, "b": b,
                     "fd": min(0.4, max(0.05, (b - a) / 2))})
@@ -288,16 +289,16 @@ def main():
             print(f"    cut seg {k+1}/{len(segs)}   ")
 
     # Concat the graded segments. Titles burn in one pass over the whole reel
-    # (OUTPUT time) — independent of the clips beneath. Plain titles go through
-    # drawtext; titles containing color emoji are pre-rendered to PNGs (drawtext
-    # can't draw color emoji) and overlaid with the same fade/enable timing.
+    # (OUTPUT time) — independent of the clips beneath. With Pillow, EVERY title
+    # is a pre-rendered PNG overlay (one consistent renderer for plain + emoji);
+    # without Pillow, title_filter's drawtext draws the plain titles instead.
     tvf = title_filter(titles, seg_dir, tscale, pw, ph)
-    emojis = emoji_title_pngs(titles, seg_dir, tscale, pw, ph)
+    overlays = title_pngs(titles, seg_dir, tscale, pw, ph)
     video_only = os.path.join(seg_dir, "video.mp4")
-    if tvf or emojis:
+    if tvf or overlays:
         reel_dur = sum(float(s["out"]) - float(s["in"]) for s in segs)
         inputs = ["-f", "concat", "-safe", "0", "-i", vlist]
-        for e in emojis:
+        for e in overlays:
             # loop the static PNG into a stream bounded to the reel length so it
             # ends cleanly (an unbounded -loop never terminates)
             inputs += ["-loop", "1", "-t", f"{reel_dur:.3f}", "-i", e["png"]]
@@ -305,7 +306,7 @@ def main():
         chain = f"[0:v]{tvf}[bg0]" if tvf else "[0:v]null[bg0]"
         parts = [chain]
         cur = "bg0"
-        for i, e in enumerate(emojis):
+        for i, e in enumerate(overlays):
             a, b, fd = e["a"], e["b"], e["fd"]
             # the looped image runs on the output clock, so fade its alpha in at
             # `a` and out at `b-fd` to match the text ramp; overlay `enable`
@@ -314,12 +315,12 @@ def main():
                     f"fade=t=in:st={a:.3f}:d={fd:.3f}:alpha=1,"
                     f"fade=t=out:st={b - fd:.3f}:d={fd:.3f}:alpha=1[e{i}]")
             parts.append(fade)
-            nxt = f"v{i}" if i < len(emojis) - 1 else "vout"
+            nxt = f"v{i}" if i < len(overlays) - 1 else "vout"
             parts.append(f"[{cur}][e{i}]overlay=0:0:enable='between(t,{a:.3f},{b:.3f})'[{nxt}]")
             cur = nxt
         fc = ";".join(parts)
         R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
-               "-filter_complex", fc, "-map", "[vout]" if emojis else "[bg0]",
+               "-filter_complex", fc, "-map", "[vout]" if overlays else "[bg0]",
                *enc, "-r", str(R.FPS), "-g", str(R.FPS), "-shortest",
                "-write_tmcd", "0", "-video_track_timescale", "60000",
                video_only])
