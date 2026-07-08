@@ -66,6 +66,51 @@ function outBase(idx) {
   for (let i = 0; i < idx; i++) a += segs()[i].out - segs()[i].in;
   return a;
 }
+
+/* ---------- title↔footage anchoring ----------
+ * Titles are reel-time, but to keep them over the same footage across clip
+ * edits we snapshot each title's anchor = which segment its START sits over +
+ * how far into that segment (offset) + its length. After the segments change
+ * we re-derive each title's reel in/out from its anchor, following the segment
+ * (via an old→new index map). A title inside a segment stays pinned to that
+ * segment's start; titles after it ripple by whatever the length change was. */
+function titleAnchors() {
+  const bounds = [];   // cumulative [start,end] reel time per segment (pre-edit)
+  let base = 0;
+  for (const s of segs()) { const d = s.out - s.in; bounds.push([base, base + d]); base += d; }
+  const total = base;
+  return titles().map((t) => {
+    // segment whose window contains the title's start; clamp to last segment
+    let seg = bounds.findIndex(([a, b]) => t.in >= a && t.in < b);
+    if (seg < 0) seg = t.in <= 0 ? 0 : bounds.length - 1;
+    const off = t.in - bounds[seg][0];
+    return { t, seg, off, len: t.out - t.in, wasEnd: t.in >= total };
+  });
+}
+
+/* Re-place titles from their anchors. `mapOldToNew[oldIdx]` = the new index of
+   that segment (or null if it was deleted; then we fall to the segment now at
+   that position, i.e. the following footage). */
+function applyTitleAnchors(anchors, mapOldToNew) {
+  const n = segs().length;
+  const total = outDur();
+  for (const a of anchors) {
+    let ni = mapOldToNew ? mapOldToNew[a.seg] : a.seg;
+    let deleted = false;
+    if (ni == null) { ni = Math.min(a.seg, n - 1); deleted = true; }  // seg removed
+    ni = clamp(ni, 0, n - 1);
+    const segLen = segs()[ni].out - segs()[ni].in;
+    // a title over deleted footage anchors to the replacement's START (its old
+    // offset points at footage that no longer exists); otherwise keep the offset
+    const off = deleted ? 0 : Math.min(a.off, segLen);
+    let inT = a.wasEnd ? total : outBase(ni) + off;
+    inT = clamp(inT, 0, Math.max(0, total - 0.1));
+    const outT = Math.min(total, inT + a.len);
+    a.t.in = Math.round(inT * 1000) / 1000;
+    a.t.out = Math.round(Math.max(outT, inT + 0.1) * 1000) / 1000;
+  }
+  titles().sort((x, y) => x.in - y.in);
+}
 function phOut() {
   const s = segs()[State.ph.idx];
   if (!s) return 0;
@@ -1185,12 +1230,21 @@ function splitAtPlayhead() {
 function deleteSelected() {
   if (!(State.selected >= 0 && segs().length > 1)) return;
   pushUndo('delete segment');
-  const T = Math.min(phOut(), outBase(State.selected));
-  segs().splice(State.selected, 1);
+  const d = State.selected;
+  const anch = titleAnchors();
+  const T = Math.min(phOut(), outBase(d));
+  segs().splice(d, 1);
+  // old→new index map: seg d is gone (null → re-anchors to footage now at d),
+  // segments after d shift down by 1
+  const map = {};
+  const oldCount = segs().length + 1;
+  for (let o = 0; o < oldCount; o++) map[o] = o < d ? o : (o === d ? null : o - 1);
+  applyTitleAnchors(anch, map);
   State.selected = -1;
   seekOut(T);
   invalidate();
   scheduleSave();
+  renderTitles();
   updateStatus();
   drawTl();
 }
@@ -1843,8 +1897,9 @@ function tlDown(e) {
     State.selected = hit.idx;
     State.selMarker = -1; State.selTitle = -1;
     const s = segs()[hit.idx];
+    // snapshot title anchors so trimming this clip ripples later titles
     Tl.drag = { mode: 'trim', idx: hit.idx, edge: hit.edge, lastX: x,
-                val: hit.edge === 'in' ? s.in : s.out };
+                val: hit.edge === 'in' ? s.in : s.out, anchors: titleAnchors() };
   } else if (hit && y > 20 && !onPlayhead) {
     // block body: click = select + seek; dragging >5px turns into a MOVE
     // (reorder), or a DUPLICATE when ⌥/Alt is held at drag-start (drop a copy,
@@ -1881,29 +1936,49 @@ function moveTargetAt(dragX) {
 function commitMove(i, k) {
   if (k === i || k === i + 1) return false;      // dropping where it already is
   pushUndo('move clip');
+  // tag segments so we can recover old→new indices after the splice
+  segs().forEach((s, idx) => { s._oi = idx; });
+  const anch = titleAnchors();
   const [seg] = segs().splice(i, 1);
   const at = k > i ? k - 1 : k;
   segs().splice(at, 0, seg);
+  const map = buildSegMap(segs());
+  applyTitleAnchors(anch, map);
   State.selected = at;
   seekSrc(at, clamp(State.ph.srcT, seg.in, seg.out));
   invalidate();
   scheduleSave();
+  renderTitles();
   updateStatus();
   drawTl();
   return true;
+}
+
+/* Read back old→new index map from _oi tags, then strip them. Titles anchored
+   to a segment that now appears more than once follow its FIRST occurrence. */
+function buildSegMap(list) {
+  const map = {};
+  list.forEach((s, idx) => { if (s._oi != null && !(s._oi in map)) map[s._oi] = idx; });
+  list.forEach((s) => { delete s._oi; });
+  return map;
 }
 
 /* Duplicate the segment at `i`, inserting a COPY at insertion boundary `k`
    (the original stays put). ⌥-drag drop. */
 function commitDup(i, k) {
   pushUndo('duplicate clip');
+  segs().forEach((s, idx) => { s._oi = idx; });
+  const anch = titleAnchors();
   const src = segs()[i];
-  const copy = { in: src.in, out: src.out };
+  const copy = { in: src.in, out: src.out };     // copy has no _oi (new footage)
   segs().splice(k, 0, copy);                     // k is a valid 0..n boundary
+  const map = buildSegMap(segs());
+  applyTitleAnchors(anch, map);
   State.selected = k;                            // select the new copy
   seekSrc(k, clamp(State.ph.srcT, copy.in, copy.out));
   invalidate();
   scheduleSave();
+  renderTitles();
   updateStatus();
   drawTl();
   return true;
@@ -1999,9 +2074,12 @@ function tlMove(e) {
   else s.out = clamp(cand, s.in + MIN_SEG, State.duration);
   s.in = Math.round(s.in * 1000) / 1000;
   s.out = Math.round(s.out * 1000) / 1000;
+  // ripple titles: same segment count, so the index map is identity
+  if (Tl.drag.anchors) applyTitleAnchors(Tl.drag.anchors, null);
   invalidate();
   seekOut(phOut());
   scheduleSave();
+  renderTitles();
   updateStatus();
   drawTl();
 }
