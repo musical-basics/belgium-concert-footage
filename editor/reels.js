@@ -38,6 +38,7 @@ const State = {
   ph: { idx: 0, srcT: 0 },                  // playhead: segment + concert time
   playing: false,
   selected: -1,
+  selRange: null,                           // [lo,hi] contiguous multi-clip span (Shift+click), else null
   selMarker: -1,
   selTitle: -1,                             // selected title index (-1 none)
   previewTitle: null,                       // title under the playhead (drag target)
@@ -67,6 +68,21 @@ function outBase(idx) {
   for (let i = 0; i < idx; i++) a += segs()[i].out - segs()[i].in;
   return a;
 }
+
+/* The contiguous span of selected clips as [lo,hi] (inclusive), or null when
+   nothing is selected. A plain single selection is [i,i]; Shift+click widens it.
+   Clamped to the current segment count so stale indices never leak out. */
+function selectedRange() {
+  const n = segs().length;
+  if (State.selRange) {
+    const lo = clamp(Math.min(...State.selRange), 0, n - 1);
+    const hi = clamp(Math.max(...State.selRange), 0, n - 1);
+    return [lo, hi];
+  }
+  if (State.selected >= 0 && State.selected < n) return [State.selected, State.selected];
+  return null;
+}
+function clearSelRange() { State.selRange = null; }
 
 /* ---------- title↔footage anchoring ----------
  * Titles are reel-time, but to keep them over the same footage across clip
@@ -217,21 +233,27 @@ function updateStatus() {
     `${State.clips.map(c => c.label).join(' / ')} · concert ${fmtSrc(State.duration)}`;
   $('reelMeta').textContent = `${fmtOut(outDur())} · ${n} segment${n === 1 ? '' : 's'}`;
   $('deleteBtn').disabled = !(State.selected >= 0 && n > 1);
+  const rng = selectedRange();
   const capBtn = $('captionBtn');
-  if (capBtn && !State.captioning) capBtn.disabled = !(State.selected >= 0);
+  if (capBtn && !State.captioning) capBtn.disabled = !rng;
   const mk = State.doc.markers[State.selMarker];
   $('deleteMarkerBtn').hidden = !mk;
   const sel = segs()[State.selected];
   const tt = titles()[State.selTitle];
+  const multi = rng && rng[1] > rng[0];
   $('segInfo').innerHTML = mk
     ? `Marker <b>${State.selMarker + 1}</b> ⚑ concert <b>${fmtSrc(mk.t)}</b>` +
       (mk.label ? ` · ${mk.label}` : '') + ' · <b>⌫</b> deletes'
     : tt
     ? `Title <b>“${(tt.text || 'Title').slice(0, 24)}”</b> · concert ` +
       `reel <b>${fmtOut(tt.in)}</b> → <b>${fmtOut(tt.out)}</b> · <b>⌫</b> deletes`
+    : multi
+    ? `Segments <b>${rng[0] + 1}–${rng[1] + 1}</b> selected (${rng[1] - rng[0] + 1} clips) · ` +
+      `<b>🗣 Add captions</b> transcribes them all · <b>Shift+click</b> to adjust`
     : sel
     ? `Segment <b>${State.selected + 1}/${n}</b> · concert <b>${fmtSrc(sel.in)}</b> → ` +
-      `<b>${fmtSrc(sel.out)}</b> · <b>${(sel.out - sel.in).toFixed(2)}s</b>`
+      `<b>${fmtSrc(sel.out)}</b> · <b>${(sel.out - sel.in).toFixed(2)}s</b> · ` +
+      `<b>Shift+click</b> another clip to caption a range`
     : 'Click a segment on the timeline to select it.';
   updateHistory();
 }
@@ -776,22 +798,32 @@ function addTitle() {
   if (inp) { inp.focus(); inp.select(); }
 }
 
-/* Auto-caption the SELECTED segment: transcribe just that concert-time slice
-   (server /api/captions) and drop the returned lines in as titles. Caption
-   lines come back in CONCERT time within the segment; map each to reel time via
-   the segment's reel base + offset. Placed as ONE undo step. Words-per-line is
-   asked each time (remembered per-device as the default). */
+/* Auto-caption the SELECTED clip(s): transcribe just their concert-time slices
+   (server /api/captions) and drop the returned lines in as titles. Works on a
+   single clip or a Shift+click contiguous span — each clip is transcribed
+   separately (a reel can reorder/duplicate clips, so each has its own concert
+   window and its own reel base) and its lines are placed at that clip's reel
+   position. Caption lines come back in CONCERT time within the clip; map each
+   to reel time via the clip's reel base + offset. Placed as ONE undo step.
+   Words-per-line is asked once and applies to the whole span. */
 const CAP_WPL_KEY = 'reels.captionWPL';
 async function addCaptions() {
   if (State.captioning) return;
-  const i = State.selected;
-  const s = segs()[i];
-  if (!s) { flashSave('⚠ select a segment first'); return; }
+  const rng = selectedRange();
+  if (!rng) { flashSave('⚠ select a clip first'); return; }
+  // capture the selected segments BY REFERENCE so index shifts during the
+  // (slow) transcription can't misplace captions — re-find each by identity.
+  const picked = [];
+  for (let i = rng[0]; i <= rng[1]; i++) picked.push(segs()[i]);
+  const nClips = picked.length;
+  const totalDur = picked.reduce((a, s) => a + (s.out - s.in), 0);
+
   let prev = 3;
   try { prev = clamp(parseInt(localStorage.getItem(CAP_WPL_KEY), 10) || 3, 1, 12); }
   catch (e) { /* ignore */ }
   const raw = prompt(
-    `Auto-caption segment ${i + 1} (${(s.out - s.in).toFixed(1)}s of audio).\n` +
+    `Auto-caption ${nClips === 1 ? `segment ${rng[0] + 1}` : `${nClips} segments (${rng[0] + 1}–${rng[1] + 1})`}` +
+    ` — ${totalDur.toFixed(1)}s of audio.\n` +
     'Words per caption line:', String(prev));
   if (raw === null) return;                     // cancelled
   const wpl = clamp(parseInt(raw, 10) || prev, 1, 12);
@@ -799,35 +831,47 @@ async function addCaptions() {
 
   State.captioning = true;
   const btn = $('captionBtn');
-  btn.disabled = true; btn.textContent = '🗣 transcribing…';
-  flashSave('transcribing the selected section…');
+  btn.disabled = true;
   try {
-    const r = await api('/api/captions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ in: s.in, out: s.out, words_per_line: wpl }),
-    }).then(r => r.json());
-    if (!r.ok) throw new Error(r.error || 'caption failed');
-    const lines = r.captions || [];
-    if (!lines.length) { flashSave('no speech found in this section'); return; }
-    // The selected segment may have shifted if edited during the request; re-find
-    // it by identity and bail if it's gone.
-    const si = segs().indexOf(s);
-    if (si < 0) { flashSave('⚠ segment changed — captions discarded'); return; }
-    pushUndo(`add ${lines.length} captions`);
-    const base = outBase(si);
+    // transcribe each clip in turn (whisper is CPU-bound — sequential avoids
+    // thrash). Collect {seg, lines} so we can place everything in one undo step.
+    const results = [];
+    for (let k = 0; k < picked.length; k++) {
+      const s = picked[k];
+      btn.textContent = nClips === 1 ? '🗣 transcribing…' : `🗣 clip ${k + 1}/${nClips}…`;
+      flashSave(nClips === 1
+        ? 'transcribing the selected section…'
+        : `transcribing clip ${k + 1} of ${nClips}…`);
+      const r = await api('/api/captions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ in: s.in, out: s.out, words_per_line: wpl }),
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || 'caption failed');
+      results.push({ s, lines: r.captions || [] });
+    }
+    const total = results.reduce((a, r) => a + r.lines.length, 0);
+    if (!total) { flashSave('no speech found in the selection'); return; }
+
+    pushUndo(`add ${total} caption${total === 1 ? '' : 's'}`);
     const def = titleStyleDefault();
     const dur = outDur();
-    for (const ln of lines) {
-      // clamp the concert times into the segment, then offset into reel time
-      const cin = clamp(ln.start, s.in, s.out), cout = clamp(ln.end, s.in, s.out);
-      let tin = base + (cin - s.in);
-      let tout = base + (cout - s.in);
-      tin = clamp(tin, 0, Math.max(0, dur - 0.1));
-      tout = clamp(Math.max(tout, tin + 0.3), tin + 0.3, dur);
-      titles().push({ text: ln.text, subtitle: '',
-        in: +tin.toFixed(3), out: +tout.toFixed(3),
-        x: def.x, y: def.y, scale: def.scale, wrap: def.wrap });
+    let placed = 0;
+    for (const { s, lines } of results) {
+      const si = segs().indexOf(s);             // re-find by identity
+      if (si < 0) continue;                     // this clip was edited away — skip it
+      const base = outBase(si);
+      for (const ln of lines) {
+        const cin = clamp(ln.start, s.in, s.out), cout = clamp(ln.end, s.in, s.out);
+        let tin = base + (cin - s.in);
+        let tout = base + (cout - s.in);
+        tin = clamp(tin, 0, Math.max(0, dur - 0.1));
+        tout = clamp(Math.max(tout, tin + 0.3), tin + 0.3, dur);
+        titles().push({ text: ln.text, subtitle: '',
+          in: +tin.toFixed(3), out: +tout.toFixed(3),
+          x: def.x, y: def.y, scale: def.scale, wrap: def.wrap });
+        placed++;
+      }
     }
     titles().sort((a, b) => a.in - b.in);
     invalidate();
@@ -835,7 +879,10 @@ async function addCaptions() {
     renderTitles();
     updateStatus();
     drawTl();
-    flashSave(`✓ added ${lines.length} caption${lines.length === 1 ? '' : 's'}`);
+    flashSave(placed
+      ? `✓ added ${placed} caption${placed === 1 ? '' : 's'}` +
+        (nClips > 1 ? ` across ${nClips} clips` : '')
+      : '⚠ selection changed — captions discarded');
   } catch (e) {
     flashSave('⚠ captions failed — ' + e.message);
   } finally {
@@ -1171,7 +1218,7 @@ function historyRestore(snap) {
   State.doc.titles = st.titles || [];
   if (st.title_scale != null) State.doc.title_scale = st.title_scale;
   State.selected = clamp(st.selected, -1, segs().length - 1);
-  State.selMarker = -1; State.selTitle = -1;
+  State.selMarker = -1; State.selTitle = -1; clearSelRange();
   State._undoTag = null;
   invalidate();
   if (st.layout && st.layout.join() !== State.doc.layout.join()) {
@@ -1297,6 +1344,7 @@ function splitAtPlayhead() {
     return;
   }
   pushUndo('split clip');
+  clearSelRange();
   segs().splice(i, 1,
     { in: s.in, out: Math.round(t * 1000) / 1000 },
     { in: Math.round(t * 1000) / 1000, out: s.out });
@@ -1311,6 +1359,7 @@ function splitAtPlayhead() {
 function deleteSelected() {
   if (!(State.selected >= 0 && segs().length > 1)) return;
   pushUndo('delete segment');
+  clearSelRange();
   const d = State.selected;
   const anch = titleAnchors();
   const T = Math.min(phOut(), outBase(d));
@@ -1444,6 +1493,7 @@ function loadDoc(doc) {
   State.selected = -1;
   State.selMarker = -1;
   State.selTitle = -1;
+  clearSelRange();
   State.undoStack = [];
   State.redoStack = [];
   State._undoTag = null;
@@ -1754,6 +1804,9 @@ function rebuildStatic() {
   // segments (contiguous in output time)
   let base = 0;
   const fills = ['rgba(79,140,255,0.16)', 'rgba(52,211,153,0.13)'];
+  const rng = selectedRange();
+  const inRange = (i) => rng && i >= rng[0] && i <= rng[1];
+  const multiSel = rng && rng[1] > rng[0];      // a real multi-clip caption span
   segs().forEach((s, i) => {
     const d = s.out - s.in;
     const x0 = timeToX(base), x1 = timeToX(base + d);
@@ -1762,6 +1815,11 @@ function rebuildStatic() {
     const bx = x0 + 1, bw = Math.max(2, x1 - x0 - 2);
     ctx.fillStyle = fills[i % 2];
     ctx.fillRect(bx, y0, bw, bh);
+    // multi-clip caption span: tint every member so the range reads as a group
+    if (multiSel && inRange(i)) {
+      ctx.fillStyle = 'rgba(79,140,255,0.22)';
+      ctx.fillRect(bx, y0, bw, bh);
+    }
     // waveform: mirrored around the block's midline, 1px columns, two-tone
     // (dim = max peak, bright = mean) so transients stand out precisely
     if (State.wave.ready && bw > 4) {
@@ -1778,14 +1836,16 @@ function rebuildStatic() {
         ctx.fillRect(bx + x, mid - st[1] * amp, 1, Math.max(1, st[1] * amp * 2));
       }
     }
-    // border + selection
-    ctx.strokeStyle = i === State.selected ? cAccent : 'rgba(42,48,64,0.9)';
-    ctx.lineWidth = i === State.selected ? 2 : 1;
+    // border + selection (single click OR any member of a caption span)
+    const on = i === State.selected || (multiSel && inRange(i));
+    ctx.strokeStyle = on ? cAccent : 'rgba(42,48,64,0.9)';
+    ctx.lineWidth = on ? 2 : 1;
     ctx.strokeRect(bx + 0.5, y0 + 0.5, bw - 1, bh - 1);
-    if (i === State.selected) {
+    if (on) {
       ctx.fillStyle = cAccent;
-      ctx.fillRect(bx, y0, 3, bh);
-      ctx.fillRect(bx + bw - 3, y0, 3, bh);
+      // only cap the OUTER edges of a span so it reads as one block
+      if (!multiSel || i === rng[0]) ctx.fillRect(bx, y0, 3, bh);
+      if (!multiSel || i === rng[1]) ctx.fillRect(bx + bw - 3, y0, 3, bh);
     }
     // labels
     if (bw > 90) {
@@ -1958,7 +2018,7 @@ function tlDown(e) {
   if (mk) {
     // select the marker and park the playhead exactly on it (S cuts there)
     State.selMarker = mk.mi;
-    State.selected = -1; State.selTitle = -1;
+    State.selected = -1; State.selTitle = -1; clearSelRange();
     seekOut(mk.T);
     invalidate();
     updateStatus();
@@ -1968,7 +2028,7 @@ function tlDown(e) {
   const th = titleLaneHit(x, y);
   if (th) {
     State.selTitle = th.ti;
-    State.selected = -1; State.selMarker = -1;
+    State.selected = -1; State.selMarker = -1; clearSelRange();
     const t = titles()[th.ti];
     if (th.edge) {
       pushUndo('trim title');
@@ -1996,9 +2056,22 @@ function tlDown(e) {
   }
   const hit = hitTest(x);
   const onPlayhead = Math.abs(timeToX(phOut()) - x) <= 6;
+  // Shift+click a clip body EXTENDS the selection into a contiguous range
+  // (anchor = the clip that was already selected) for "Add captions". It never
+  // starts a drag/scrub — snapping-off during scrub isn't relevant here.
+  if (hit && hit.edge == null && e.shiftKey && y > 20) {
+    const anchor = State.selected >= 0 ? State.selected : hit.idx;
+    State.selRange = [anchor, hit.idx];
+    State.selected = hit.idx;                 // keep a valid single index for edits
+    State.selMarker = -1; State.selTitle = -1;
+    invalidate();
+    updateStatus();
+    drawTl();
+    return;
+  }
   if (hit && hit.edge) {
     pushUndo('trim clip');
-    State.selected = hit.idx;
+    State.selected = hit.idx; clearSelRange();
     State.selMarker = -1; State.selTitle = -1;
     const s = segs()[hit.idx];
     // snapshot title anchors so trimming this clip ripples later titles;
@@ -2010,12 +2083,12 @@ function tlDown(e) {
     // block body: click = select + seek; dragging >5px turns into a MOVE
     // (reorder), or a DUPLICATE when ⌥/Alt is held at drag-start (drop a copy,
     // leave the original). Scrub-drags live on the ruler strip / playhead.
-    State.selected = hit.idx;
+    State.selected = hit.idx; clearSelRange();
     State.selMarker = -1; State.selTitle = -1;
     seekOut(snapOut(xToTime(x), e.shiftKey));
     Tl.drag = { mode: 'maybemove', idx: hit.idx, startX: x, x, dup: e.altKey };
   } else {
-    State.selected = hit ? hit.idx : -1;
+    State.selected = hit ? hit.idx : -1; clearSelRange();
     State.selMarker = -1; State.selTitle = -1;
     Tl.drag = { mode: 'scrub' };
     seekOut(snapOut(xToTime(x), e.shiftKey));
@@ -2042,6 +2115,7 @@ function moveTargetAt(dragX) {
 function commitMove(i, k) {
   if (k === i || k === i + 1) return false;      // dropping where it already is
   pushUndo('move clip');
+  clearSelRange();
   // tag segments so we can recover old→new indices after the splice
   segs().forEach((s, idx) => { s._oi = idx; });
   const anch = titleAnchors();
@@ -2073,6 +2147,7 @@ function buildSegMap(list) {
    (the original stays put). ⌥-drag drop. */
 function commitDup(i, k) {
   pushUndo('duplicate clip');
+  clearSelRange();
   segs().forEach((s, idx) => { s._oi = idx; });
   const anch = titleAnchors();
   const src = segs()[i];
@@ -2259,6 +2334,7 @@ function bindKeys() {
         break;
       case 'Escape':
         State.selected = -1; State.selMarker = -1; State.selTitle = -1;
+        clearSelRange();
         invalidate(); updateStatus(); drawTl(); break;
       case '+': case '=':
         zoomView(1 / 1.5); drawTl(); break;
