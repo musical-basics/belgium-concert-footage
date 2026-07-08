@@ -1008,20 +1008,34 @@ def _style_worker(style):
                 last = line
                 info["line"] = line
                 m = re.search(r"cut seg (\d+)/(\d+)", line)
+                mt = re.search(r"title (\d+)/(\d+)", line)
+                ms = re.search(r"^step (.+)$", line)
                 if m:
                     cur, total = int(m.group(1)), int(m.group(2))
                     info["progress"] = round(cur / total * 100) if total else 0
                     info["phase"] = "finishing" if cur >= total else "cutting"
+                elif mt:
+                    # second progress track: Pillow title-image rendering
+                    cur, total = int(mt.group(1)), int(mt.group(2))
+                    info["step"] = "rendering titles"
+                    info["step_progress"] = round(cur / total * 100) if total else 0
+                elif ms:
+                    # finishing sub-step label (burning titles / mixing / muxing)
+                    info["step"] = ms.group(1).strip()
+                    if "render" not in info["step"]:
+                        info["step_progress"] = None   # indeterminate ffmpeg step
                 elif "✓" in line and ".mp4" in line:
                     fm = re.search(r"(\S+\.mp4)\s*$", line)
                     if fm:
                         info["file"] = os.path.basename(fm.group(1))
                     info["progress"] = 100
+                    info["step"] = None
             proc.wait()
             info["code"] = proc.returncode
             if proc.returncode == 0:
                 info["status"] = "done"
                 info["progress"], info["phase"] = 100, "done"
+                info["step"] = None
             else:
                 info["status"] = "error"
                 info["error"] = last or f"style render exited {proc.returncode}"
@@ -1070,6 +1084,7 @@ def styles_status():
                 "status": job["status"], "progress": job.get("progress", 0),
                 "phase": job.get("phase", ""), "error": job.get("error"),
                 "file": job.get("file"),
+                "step": job.get("step"), "step_progress": job.get("step_progress"),
                 "elapsed": round((job.get("ended") or time.time()) - start) if start else 0,
             }
         out.append(entry)

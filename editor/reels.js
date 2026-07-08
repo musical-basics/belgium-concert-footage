@@ -2242,6 +2242,25 @@ function revealOrOpen(reveal) {
   });
 }
 
+/* Show/hide the export progress bar. label=null hides it. pct=null => an
+   indeterminate (sliding) bar for ffmpeg steps we can't measure. */
+function setExportBar(label, pct) {
+  const bar = $('exportBar');
+  if (!bar) return;
+  if (label == null) { bar.hidden = true; return; }
+  bar.hidden = false;
+  $('exportBarLabel').textContent =
+    pct != null ? `${label} — ${pct}%` : `${label}…`;
+  const fill = $('exportBarFill');
+  if (pct == null) {
+    fill.classList.add('indet');
+    fill.style.width = '';
+  } else {
+    fill.classList.remove('indet');
+    fill.style.width = clamp(pct, 0, 100) + '%';
+  }
+}
+
 async function refreshExport() {
   try {
     const st = await api('/api/styles').then(r => r.json());
@@ -2251,13 +2270,26 @@ async function refreshExport() {
     const btn = $('exportBtn');
     if (job && (job.status === 'running' || job.status === 'queued')) {
       btn.disabled = true;
-      btn.textContent = job.status === 'queued'
-        ? '⏳ queued…'
-        : `⏳ ${job.phase} ${job.progress || 0}%`;
+      if (job.status === 'queued') {
+        btn.textContent = '⏳ queued…';
+      } else if (job.step) {
+        // finishing sub-step (titles / burn / mix / mux). Show a 2nd bar for
+        // the title-image rendering (it's the slow, countable part); other
+        // steps are indeterminate ffmpeg passes.
+        const sp = job.step_progress;
+        btn.textContent = sp != null
+          ? `⏳ ${job.step} ${sp}%`
+          : `⏳ ${job.step}…`;
+        setExportBar(job.step, sp);
+      } else {
+        btn.textContent = `⏳ ${job.phase} ${job.progress || 0}%`;
+        setExportBar(job.phase === 'cutting' ? 'cutting clips' : job.phase, job.progress);
+      }
       return true;
     }
     btn.disabled = false;
     btn.textContent = '🎬 Export reel';
+    setExportBar(null);
     if (job && job.status === 'error') flashSave('⚠ render failed — ' + (job.error || ''));
     // output filename comes from the finished job's "✓" line
     const file = (job && job.status === 'done' && job.file) || null;
@@ -2273,7 +2305,7 @@ function pollExport() {
   State.exportTimer = setInterval(async () => {
     const busy = await refreshExport();
     if (!busy) clearInterval(State.exportTimer);
-  }, 1500);
+  }, 700);   // fast enough to track the title-render + finishing sub-steps
   refreshExport();
 }
 

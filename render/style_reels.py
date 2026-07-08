@@ -125,16 +125,18 @@ def title_pngs(titles, work_dir, gscale, pw, ph):
     drawtext fallback draws the plain titles instead)."""
     if not TI:
         return []
+    # count the titles we'll actually render, for progress
+    todo = [t for t in titles if float(t["out"]) - float(t["in"]) > 0.05]
+    total = len(todo)
     out = []
-    for n, ttl in enumerate(titles):
-        a = max(0.0, float(ttl["in"]))
-        b = float(ttl["out"])
-        if b - a <= 0.05:
-            continue
-        png = os.path.join(work_dir, f"ttl_{n}.png")
+    for j, ttl in enumerate(todo):
+        a, b = max(0.0, float(ttl["in"])), float(ttl["out"])
+        png = os.path.join(work_dir, f"ttl_{titles.index(ttl)}.png")
         TI.render_title_png(ttl, png, pw, ph, gscale)
         out.append({"png": png, "a": a, "b": b,
                     "fd": min(0.4, max(0.05, (b - a) / 2))})
+        # progress protocol parsed by the editor (second bar): "title X/Y"
+        print(f"    title {j + 1}/{total}   ", flush=True)
     return out
 
 
@@ -296,9 +298,12 @@ def main():
     # is a pre-rendered PNG overlay (one consistent renderer for plain + emoji);
     # without Pillow, title_filter's drawtext draws the plain titles instead.
     tvf = title_filter(titles, seg_dir, tscale, pw, ph)
+    if titles:
+        print("  step rendering titles", flush=True)
     overlays = title_pngs(titles, seg_dir, tscale, pw, ph)
     video_only = os.path.join(seg_dir, "video.mp4")
     if tvf or overlays:
+        print("  step burning titles into the reel", flush=True)
         reel_dur = sum(float(s["out"]) - float(s["in"]) for s in segs)
         inputs = ["-f", "concat", "-safe", "0", "-i", vlist]
         for e in overlays:
@@ -331,11 +336,13 @@ def main():
         R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                "-f", "concat", "-safe", "0", "-i", vlist, "-c", "copy",
                video_only])
+    print("  step mixing audio", flush=True)
     audio_only = os.path.join(seg_dir, "audio.m4a")
     R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-f", "concat", "-safe", "0", "-i", alist,
            "-c:a", "aac", "-b:a", "256k", "-ar", "48000", audio_only])
 
+    print("  step muxing final file", flush=True)
     out_path = os.path.join(OUT_DIR, name + ".mp4")
     R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-i", video_only, "-i", audio_only,
