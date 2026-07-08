@@ -61,20 +61,20 @@ def probe_dims(path):
     return _DIMS_CACHE[path]
 
 
-def title_filter(titles, seg_in, seg_out, work_dir, key, gscale, pw, ph):
-    """drawtext chain for titles overlapping this segment's concert window.
+def title_filter(titles, work_dir, gscale, pw, ph):
+    """drawtext chain for all titles, in OUTPUT (reel) time.
 
-    Mirrors render.py's title_filter but for the PORTRAIT frame: fontsize and
-    the vertical block layout use the reel's real height `ph` (1920), the wrap
-    widths use the same base char counts, and x/y are normalized over the
-    reel frame (x*pw, y*ph). Times are shifted by -seg_in since each output
-    segment restarts at 0. '' when nothing overlaps."""
+    Titles live on the reel clock — a title is 'show this text from reel-time
+    in..out', independent of the clips beneath it. So this runs once over the
+    final concatenated reel (not per segment). fontsize and vertical layout use
+    the reel height `ph` (1920); x/y are normalized over the reel frame. '' when
+    there are no titles."""
     style = (f"fontfile='{R.TITLE_FONT}':fontcolor=white:borderw=4:"
              f"bordercolor=black@0.9:shadowcolor=black@0.55:shadowx=2:shadowy=3")
     parts = []
     for n, ttl in enumerate(titles):
-        a = max(0.0, float(ttl["in"]) - seg_in)
-        b = min(seg_out, float(ttl["out"])) - seg_in
+        a = max(0.0, float(ttl["in"]))
+        b = float(ttl["out"])
         if b - a <= 0.05:
             continue
         fd = min(0.4, max(0.05, (b - a) / 2))
@@ -94,14 +94,14 @@ def title_filter(titles, seg_in, seg_out, work_dir, key, gscale, pw, ph):
         block_h = len(mains) * lh_main + gap + len(subs) * lh_sub
         y0 = cy * ph - block_h / 2
         for li, line in enumerate(mains):
-            tf = os.path.join(work_dir, f"ttl_{key}_{n}_m{li}.txt")
+            tf = os.path.join(work_dir, f"ttl_{n}_m{li}.txt")
             with open(tf, "w") as f:
                 f.write(line)
             parts.append(f"drawtext=textfile='{tf}':{style}:fontsize={fs_main}:"
                          f"y={round(y0 + li * lh_main)}:{tail}")
         sy0 = y0 + len(mains) * lh_main + gap
         for li, line in enumerate(subs):
-            tf = os.path.join(work_dir, f"ttl_{key}_{n}_s{li}.txt")
+            tf = os.path.join(work_dir, f"ttl_{n}_s{li}.txt")
             with open(tf, "w") as f:
                 f.write(line)
             parts.append(f"drawtext=textfile='{tf}':{style}:fontsize={fs_sub}:"
@@ -232,11 +232,8 @@ def main():
                 inputs += [*hw, "-ss", f"{t_in:.3f}", "-i", R.src_path(cam)]
             fc = ";".join(f"[{i}:v]{chains[i]}[v{i}]" for i in range(n))
             stack = "".join(f"[v{i}]" for i in range(n))
-            # titles burn onto the full portrait frame, after the vstack
-            tvf = title_filter(titles, t_in, t_out, seg_dir, k, tscale, pw, ph)
-            post = f",{tvf}" if tvf else ""
             fc += (f";{stack}vstack=inputs={n},format=yuv420p,"
-                   f"setpts=PTS-STARTPTS{post}[v]")
+                   f"setpts=PTS-STARTPTS[v]")
             vout = os.path.join(seg_dir, f"seg_{k:03d}.mp4")
             R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                    *inputs, "-t", f"{dur:.3f}", "-filter_complex", fc,
@@ -251,9 +248,21 @@ def main():
             af_.write(f"file '{os.path.abspath(aout)}'\n")
             print(f"    cut seg {k+1}/{len(segs)}   ")
 
+    # Concat the graded segments. If there are titles, burn them in one pass
+    # over the whole reel (OUTPUT time) — that's what makes a title independent
+    # of the clips beneath it (no per-clip duplication, no cut clipping).
+    tvf = title_filter(titles, seg_dir, tscale, pw, ph)
     video_only = os.path.join(seg_dir, "video.mp4")
-    R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-f", "concat", "-safe", "0", "-i", vlist, "-c", "copy", video_only])
+    if tvf:
+        R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+               "-f", "concat", "-safe", "0", "-i", vlist,
+               "-vf", tvf, *enc, "-r", str(R.FPS), "-g", str(R.FPS),
+               "-write_tmcd", "0", "-video_track_timescale", "60000",
+               video_only])
+    else:
+        R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+               "-f", "concat", "-safe", "0", "-i", vlist, "-c", "copy",
+               video_only])
     audio_only = os.path.join(seg_dir, "audio.m4a")
     R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-f", "concat", "-safe", "0", "-i", alist,

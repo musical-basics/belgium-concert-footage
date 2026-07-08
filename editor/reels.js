@@ -169,7 +169,7 @@ function updateStatus() {
       (mk.label ? ` · ${mk.label}` : '') + ' · <b>⌫</b> deletes'
     : tt
     ? `Title <b>“${(tt.text || 'Title').slice(0, 24)}”</b> · concert ` +
-      `<b>${fmtSrc(tt.in)}</b> → <b>${fmtSrc(tt.out)}</b> · <b>⌫</b> deletes`
+      `reel <b>${fmtOut(tt.in)}</b> → <b>${fmtOut(tt.out)}</b> · <b>⌫</b> deletes`
     : sel
     ? `Segment <b>${State.selected + 1}/${n}</b> · concert <b>${fmtSrc(sel.in)}</b> → ` +
       `<b>${fmtSrc(sel.out)}</b> · <b>${(sel.out - sel.in).toFixed(2)}s</b>`
@@ -558,12 +558,13 @@ function buildColorRows() {
 }
 
 /* ---------- titles (text overlays burned into the reel) ----------
- * Same model as the main editor: {text, subtitle, in, out, x, y, scale} with
- * in/out in CONCERT seconds (so a title shows wherever that concert moment
- * lands in the reel, even on a duplicated clip), x/y normalized 0..1 over the
- * 1080x1920 frame, scale a font multiplier. The stage is real output pixels
- * scaled by stageK, so the overlay covers the whole stage and font sizes use
- * OUT_H directly — the CSS scale() keeps it WYSIWYG with the export. */
+ * A title is {text, subtitle, in, out, x, y, scale} where in/out are OUTPUT
+ * (reel-timeline) seconds — a title says "show this from reel-time in..out",
+ * fully independent of the clips beneath it. Duplicating/cutting/reordering
+ * clips never touches a title; it just stays at its reel position. x/y are
+ * normalized 0..1 over the 1080x1920 frame, scale a font multiplier. The stage
+ * is real output pixels scaled by stageK, so the overlay covers the whole stage
+ * and font sizes use OUT_H directly — CSS scale() keeps it WYSIWYG. */
 function titles() { return State.doc.titles; }
 function titleScale() { return State.doc.title_scale || 1; }
 
@@ -577,11 +578,11 @@ function wrapText(s, max) {
   return lines.join('\n');
 }
 
-/* The title whose concert window contains the playhead's concert time (topmost
+/* The title whose reel window contains the playhead's output time (topmost
    wins). Drives the live preview + is the drag target. */
-function activeTitleAt(srcT) {
+function activeTitleAt(outT) {
   let active = null;
-  for (const t of titles()) if (srcT >= t.in && srcT <= t.out) active = t;
+  for (const t of titles()) if (outT >= t.in && outT <= t.out) active = t;
   return active;
 }
 
@@ -589,15 +590,16 @@ function activeTitleAt(srcT) {
 function updateTitleOverlay() {
   const box = $('titleOverlay');
   if (!box) return;
-  const active = activeTitleAt(State.ph.srcT);
+  const outT = phOut();
+  const active = activeTitleAt(outT);
   const has = !!active && !!(((active.text || '').trim()) || ((active.subtitle || '').trim()));
   State.previewTitle = has ? active : null;
   if (!has) { if (!box.hidden) box.hidden = true; return; }
   // symmetric fade (mirrors the render's alpha ramp)
   const fd = Math.min(0.4, Math.max(0.05, (active.out - active.in) / 2));
   let op = 1;
-  if (State.ph.srcT < active.in + fd) op = (State.ph.srcT - active.in) / fd;
-  else if (State.ph.srcT > active.out - fd) op = (active.out - State.ph.srcT) / fd;
+  if (outT < active.in + fd) op = (outT - active.in) / fd;
+  else if (outT > active.out - fd) op = (active.out - outT) / fd;
   op = Math.max(0, Math.min(1, op));
   const cx = active.x == null ? TITLE_DEF_X : active.x;
   const cy = active.y == null ? TITLE_DEF_Y : active.y;
@@ -657,8 +659,9 @@ function bindTitleDrag() {
 
 function addTitle() {
   pushUndo();
-  const t = State.ph.srcT;
-  let tin = t, tout = Math.min(State.duration, t + TITLE_DEFAULT_LEN);
+  const dur = outDur();
+  const t = clamp(phOut(), 0, dur);          // reel-time position
+  let tin = t, tout = Math.min(dur, t + TITLE_DEFAULT_LEN);
   if (tout - tin < 1) tin = Math.max(0, tout - TITLE_DEFAULT_LEN);
   const title = { text: 'Title', subtitle: '', in: +tin.toFixed(3), out: +tout.toFixed(3),
                   x: TITLE_DEF_X, y: TITLE_DEF_Y, scale: 1 };
@@ -680,24 +683,11 @@ function selectTitle(idx, opts = {}) {
   State.selTitle = idx;
   State.selected = -1; State.selMarker = -1;
   const t = titles()[idx];
-  if (seek && t) {
-    const ot = outputTimeOfConcert(t.in);
-    if (ot != null) seekOut(clamp(ot, 0, outDur()));
-  }
+  if (seek && t) seekOut(clamp(t.in, 0, outDur()));   // in/out are reel time
   invalidate();
   renderTitles();
   updateStatus();
   drawTl();
-}
-
-/* First output time at which concert time `srcT` is shown (or null). */
-function outputTimeOfConcert(srcT) {
-  let base = 0;
-  for (const s of segs()) {
-    if (srcT >= s.in && srcT <= s.out) return base + (srcT - s.in);
-    base += s.out - s.in;
-  }
-  return null;
 }
 
 function deleteTitle(idx) {
@@ -733,7 +723,7 @@ function renderTitles() {
       `<span class="tmeta">` +
       `<input class="ttext" type="text" placeholder="Title text" value="${esc(t.text)}" />` +
       `<input class="ttext tsub" type="text" placeholder="Subtitle (optional)" value="${esc(t.subtitle)}" />` +
-      `<span class="ttime">${fmtSrc(t.in)} → ${fmtSrc(t.out)} · ${(t.out - t.in).toFixed(1)}s</span>` +
+      `<span class="ttime">reel ${fmtOut(t.in)} → ${fmtOut(t.out)} · ${(t.out - t.in).toFixed(1)}s</span>` +
       `</span>` +
       `<span class="tfont" title="Title font size (this title)">` +
       `<button class="small" data-act="fdec">A−</button>` +
@@ -1316,20 +1306,10 @@ function markerOccurrences() {
   return out;
 }
 
-/* Each title's concert [in,out] window mapped into OUTPUT-time bars, clipped
-   per segment (so a title can show as multiple bars across cuts/duplicates). */
+/* Titles are in OUTPUT time — each is exactly one bar at [in,out] on the reel
+   timeline (independent of the clips beneath). One occurrence per title. */
 function titleOccurrences() {
-  const out = [];
-  let base = 0;
-  for (const s of segs()) {
-    const segLen = s.out - s.in;
-    titles().forEach((t, ti) => {
-      const a = Math.max(t.in, s.in), b = Math.min(t.out, s.out);
-      if (b - a > 0.001) out.push({ ti, T0: base + (a - s.in), T1: base + (b - s.in) });
-    });
-    base += segLen;
-  }
-  return out;
+  return titles().map((t, ti) => ({ ti, T0: t.in, T1: t.out }));
 }
 
 const SNAP_PX = 8;
@@ -1671,13 +1651,11 @@ function tlDown(e) {
     const t = titles()[th.ti];
     if (th.edge) {
       pushUndo();
-      // edge drag retimes the title in CONCERT seconds. Map output-x -> concert
-      // via the segment under this occurrence (1:1 within a segment).
+      // edge drag retimes the title in REEL (output) seconds — 1:1 with the x.
       Tl.drag = { mode: 'titletrim', ti: th.ti, edge: th.edge, lastX: x,
                   val: th.edge === 'in' ? t.in : t.out };
     } else {
-      const ot = outputTimeOfConcert(t.in);
-      if (ot != null) seekOut(clamp(ot, 0, outDur()));
+      seekOut(clamp(t.in, 0, outDur()));
       Tl.drag = { mode: 'titlemove', ti: th.ti, lastX: x };
     }
     invalidate();
@@ -1813,11 +1791,11 @@ function tlMove(e) {
     return;               // ghost + insertion caret drawn by drawTl
   }
   if (Tl.drag.mode === 'titletrim') {
-    // retime a title edge in concert seconds; output Δ == concert Δ (1:1)
+    // retime a title edge in REEL (output) seconds — output Δ == title Δ
     Tl.drag.val += (x - Tl.drag.lastX) / Tl.w * State.view.span;
     Tl.drag.lastX = x;
     const t = titles()[Tl.drag.ti];
-    const cand = Math.max(0, Math.min(State.duration, Tl.drag.val));
+    const cand = Math.max(0, Math.min(outDur(), Tl.drag.val));
     if (Tl.drag.edge === 'in') t.in = Math.min(cand, t.out - 0.1);
     else t.out = Math.max(cand, t.in + 0.1);
     t.in = Math.round(t.in * 1000) / 1000;
@@ -1826,12 +1804,12 @@ function tlMove(e) {
     return;
   }
   if (Tl.drag.mode === 'titlemove') {
-    // slide the whole title window, preserving length
+    // slide the whole title window on the reel timeline, preserving length
     const dOut = (x - Tl.drag.lastX) / Tl.w * State.view.span;
     Tl.drag.lastX = x;
     const t = titles()[Tl.drag.ti];
     const len = t.out - t.in;
-    let ni = clamp(t.in + dOut, 0, State.duration - len);
+    let ni = clamp(t.in + dOut, 0, outDur() - len);
     t.in = Math.round(ni * 1000) / 1000;
     t.out = Math.round((ni + len) * 1000) / 1000;
     invalidate(); scheduleSave(); renderTitles(); drawTl();

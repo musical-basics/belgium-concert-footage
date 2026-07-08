@@ -783,14 +783,15 @@ def clean_reels(raw):
         marks.append(entry)
     marks.sort(key=lambda m: m["t"])
     doc["markers"] = marks
-    # Titles: text overlays burned into the reel. in/out are concert seconds;
-    # x/y are normalized 0..1 over the whole 1080x1920 frame; scale is a font
-    # multiplier (same model as the main editor's titles).
+    # Titles: text overlays burned into the reel. in/out are OUTPUT (reel-
+    # timeline) seconds — a title is independent of the clips beneath it. x/y
+    # are normalized 0..1 over the 1080x1920 frame; scale is a font multiplier.
+    reel_dur = sum(s["out"] - s["in"] for s in doc["segments"]) or dur
     titles = []
     for t in (raw.get("titles") or [])[:200]:
         try:
-            ti = max(0.0, min(dur, float(t["in"])))
-            to = max(0.0, min(dur, float(t["out"])))
+            ti = max(0.0, min(reel_dur, float(t["in"])))
+            to = max(0.0, min(reel_dur, float(t["out"])))
         except (TypeError, ValueError, KeyError):
             continue
         if to - ti < 0.05:
