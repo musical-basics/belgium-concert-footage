@@ -1397,28 +1397,20 @@ function buildProjectBar() {
       refreshProjectSelect();
     }
   });
+  // double-click the reel name to rename it (same as the ✎ button)
+  $('projSelect').addEventListener('dblclick', renameCurrentReel);
   $('projNew').addEventListener('click', async () => {
-    const name = prompt(
-      'Name for the new reel (it starts with the entire show):',
-      `Reel ${State.projects.length + 1}`);
-    if (name === null) return;
+    const name = askReelName(
+      'Name for the new reel (it starts with the entire show).\n' +
+      'This becomes the export filename (reel_<name>.mp4):', '');
+    if (name === null) return;                 // cancelled
     try {
       await flushSave();
       applyProjectState(await projectRequest('/api/reels/new', { name }));
-      flashSave('✓ new reel — full show loaded');
+      flashSave(`✓ new reel “${name}” — full show loaded`);
     } catch (err) { flashSave('⚠ ' + err.message); }
   });
-  $('projRename').addEventListener('click', async () => {
-    const cur = State.projects.find(p => p.id === State.projectId);
-    const name = prompt('Rename this reel:', cur ? cur.name : '');
-    if (!name) return;
-    try {
-      const st = await projectRequest('/api/reels/rename',
-                                      { id: State.projectId, name });
-      State.projects = st.projects;
-      refreshProjectSelect();
-    } catch (err) { flashSave('⚠ ' + err.message); }
-  });
+  $('projRename').addEventListener('click', renameCurrentReel);
   $('projDelete').addEventListener('click', async () => {
     const cur = State.projects.find(p => p.id === State.projectId);
     if (!confirm(`Delete reel "${cur ? cur.name : ''}"? Only its cut list is ` +
@@ -1429,6 +1421,37 @@ function buildProjectBar() {
     } catch (err) { flashSave('⚠ ' + err.message); }
   });
 }
+/* Prompt for a reel name, re-asking on blank/whitespace input so a reel never
+   silently ends up as "Reel N". Returns the trimmed name, or null if the user
+   cancels. */
+function askReelName(message, initial) {
+  let cur = initial || '';
+  for (;;) {
+    const raw = prompt(message, cur);
+    if (raw === null) return null;             // cancelled
+    const name = raw.trim();
+    if (name) return name;
+    cur = '';
+    message = 'Please enter a name for the reel (it can’t be blank):';
+  }
+}
+
+async function renameCurrentReel() {
+  const cur = State.projects.find(p => p.id === State.projectId);
+  const name = askReelName(
+    'Rename this reel — this also renames its export file (reel_<name>.mp4):',
+    cur ? cur.name : '');
+  if (name === null) return;
+  try {
+    const st = await projectRequest('/api/reels/rename',
+                                    { id: State.projectId, name });
+    State.projects = st.projects;
+    refreshProjectSelect();
+    refreshExport();                           // export filename tracks the name
+    flashSave(`✓ renamed to “${name}”`);
+  } catch (err) { flashSave('⚠ ' + err.message); }
+}
+
 function flashSave(msg) {
   $('saveState').textContent = msg;
   setTimeout(() => { if ($('saveState').textContent === msg) $('saveState').textContent = ''; }, 2500);
@@ -2289,6 +2312,8 @@ async function refreshExport() {
     }
     btn.disabled = false;
     btn.textContent = '🎬 Export reel';
+    btn.title = `Render the reel to ${reelBaseName()}.mp4 ` +
+                '(1080×1920, all segments, mastered audio bed)';
     setExportBar(null);
     if (job && job.status === 'error') flashSave('⚠ render failed — ' + (job.error || ''));
     // output filename comes from the finished job's "✓" line
