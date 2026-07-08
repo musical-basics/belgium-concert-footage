@@ -136,14 +136,16 @@ async function boot() {
 
 function bindSave() {
   $('saveBtn').addEventListener('click', () => { doSave(); });
-  // ⌘S / Ctrl+S -> save. Registered on window in the CAPTURE phase so it wins
-  // before the browser's own "Save Page" default (which otherwise steals it,
-  // and before any per-widget handler). This is the reliable place for it.
+  // ⌘S/Ctrl+S -> save, ⌘T/Ctrl+T -> new title. Registered on window in the
+  // CAPTURE phase so they win before the browser's own defaults (Save Page /
+  // New Tab) and before any per-widget handler. This is the reliable place.
   window.addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 's' || e.key === 'S')) {
-      e.preventDefault();
-      e.stopPropagation();
-      doSave();
+    if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 's') {
+      e.preventDefault(); e.stopPropagation(); doSave();
+    } else if (k === 't') {
+      e.preventDefault(); e.stopPropagation(); addTitle();
     }
   }, true);
   // Flush pending edits when the tab is closed/reloaded or backgrounded, so a
@@ -1781,6 +1783,15 @@ function tlDown(e) {
       // edge drag retimes the title in REEL (output) seconds — 1:1 with the x.
       Tl.drag = { mode: 'titletrim', ti: th.ti, edge: th.edge, lastX: x,
                   val: th.edge === 'in' ? t.in : t.out };
+    } else if (e.altKey) {
+      // ⌥-drag a title body = duplicate it, then drag the copy (original stays)
+      pushUndo('duplicate title');
+      const copy = Object.assign({}, t);
+      titles().push(copy);
+      titles().sort((a, b) => a.in - b.in);
+      const ci = titles().indexOf(copy);
+      State.selTitle = ci;
+      Tl.drag = { mode: 'titlemove', ti: ci, lastX: x, dup: true };
     } else {
       seekOut(clamp(t.in, 0, outDur()));
       Tl.drag = { mode: 'titlemove', ti: th.ti, lastX: x };
@@ -1895,8 +1906,10 @@ function tlMove(e) {
       Tl.cvs.style.cursor =
         mk ? 'pointer'
         : th && th.edge ? 'col-resize'
+        : th && e.altKey ? 'copy'
         : th ? 'grab'
         : hit && hit.edge ? 'col-resize'
+        : hit && y > 20 && e.altKey ? 'copy'
         : hit && y > 20 ? 'grab'
         : 'crosshair';
     } else {
