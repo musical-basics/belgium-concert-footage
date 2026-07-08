@@ -90,8 +90,14 @@ function titleAnchors() {
 
 /* Re-place titles from their anchors. `mapOldToNew[oldIdx]` = the new index of
    that segment (or null if it was deleted; then we fall to the segment now at
-   that position, i.e. the following footage). */
-function applyTitleAnchors(anchors, mapOldToNew) {
+   that position, i.e. the following footage).
+
+   `leftTrim` = {seg, delta} when a LEFT edge was dragged: the segment's start
+   footage slid by `delta` (new_in - old_in), so a title INSIDE that segment
+   follows the footage — its offset moves by -delta (drag the start later →
+   the title's content is now earlier in the shorter clip). Right-edge trims
+   and structural edits don't slide start footage, so titles inside stay put. */
+function applyTitleAnchors(anchors, mapOldToNew, leftTrim) {
   const n = segs().length;
   const total = outDur();
   for (const a of anchors) {
@@ -100,9 +106,11 @@ function applyTitleAnchors(anchors, mapOldToNew) {
     if (ni == null) { ni = Math.min(a.seg, n - 1); deleted = true; }  // seg removed
     ni = clamp(ni, 0, n - 1);
     const segLen = segs()[ni].out - segs()[ni].in;
+    let off = a.off;
+    if (leftTrim && a.seg === leftTrim.seg) off -= leftTrim.delta;   // follow slid footage
     // a title over deleted footage anchors to the replacement's START (its old
     // offset points at footage that no longer exists); otherwise keep the offset
-    const off = deleted ? 0 : Math.min(a.off, segLen);
+    off = deleted ? 0 : clamp(off, 0, segLen);
     let inT = a.wasEnd ? total : outBase(ni) + off;
     inT = clamp(inT, 0, Math.max(0, total - 0.1));
     const outT = Math.min(total, inT + a.len);
@@ -1897,9 +1905,11 @@ function tlDown(e) {
     State.selected = hit.idx;
     State.selMarker = -1; State.selTitle = -1;
     const s = segs()[hit.idx];
-    // snapshot title anchors so trimming this clip ripples later titles
+    // snapshot title anchors so trimming this clip ripples later titles;
+    // remember the original in so a left-edge drag can slide inside titles
     Tl.drag = { mode: 'trim', idx: hit.idx, edge: hit.edge, lastX: x,
-                val: hit.edge === 'in' ? s.in : s.out, anchors: titleAnchors() };
+                val: hit.edge === 'in' ? s.in : s.out, origIn: s.in,
+                anchors: titleAnchors() };
   } else if (hit && y > 20 && !onPlayhead) {
     // block body: click = select + seek; dragging >5px turns into a MOVE
     // (reorder), or a DUPLICATE when ⌥/Alt is held at drag-start (drop a copy,
@@ -2074,8 +2084,13 @@ function tlMove(e) {
   else s.out = clamp(cand, s.in + MIN_SEG, State.duration);
   s.in = Math.round(s.in * 1000) / 1000;
   s.out = Math.round(s.out * 1000) / 1000;
-  // ripple titles: same segment count, so the index map is identity
-  if (Tl.drag.anchors) applyTitleAnchors(Tl.drag.anchors, null);
+  // ripple titles: same segment count (identity map). A LEFT-edge drag also
+  // slides titles INSIDE this clip, since its start footage moved.
+  if (Tl.drag.anchors) {
+    const leftTrim = Tl.drag.edge === 'in'
+      ? { seg: Tl.drag.idx, delta: s.in - Tl.drag.origIn } : null;
+    applyTitleAnchors(Tl.drag.anchors, null, leftTrim);
+  }
   invalidate();
   seekOut(phOut());
   scheduleSave();
