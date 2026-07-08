@@ -44,7 +44,8 @@ const State = {
   snap: { x: false, y: false },             // center-lock guide state
   view: { start: 0, span: 60 },             // timeline window (output time)
   wave: { ready: false, peaks: null, pps: 100 },
-  undoStack: [],
+  undoStack: [],                            // [{snap, label}] — states to undo TO
+  redoStack: [],                            // [{snap, label}] — states to redo TO
   saveTimer: null,
   dirty: false,                             // unsaved edits pending
   exportTimer: null,
@@ -174,7 +175,7 @@ function updateStatus() {
     ? `Segment <b>${State.selected + 1}/${n}</b> · concert <b>${fmtSrc(sel.in)}</b> → ` +
       `<b>${fmtSrc(sel.out)}</b> · <b>${(sel.out - sel.in).toFixed(2)}s</b>`
     : 'Click a segment on the timeline to select it.';
-  $('undoBtn').disabled = !State.undoStack.length;
+  updateHistory();
 }
 
 /* ---------- stage: stacked panes + XY framing ---------- */
@@ -258,20 +259,20 @@ function bindPane(pane, cam) {
       pane.removeEventListener('pointermove', move);
       pane.removeEventListener('pointerup', up);
     };
-    pushUndoOnce('pane-' + cam);
+    pushUndoOnce('pane-' + cam, 'move camera');
     pane.addEventListener('pointermove', move);
     pane.addEventListener('pointerup', up);
   });
   pane.addEventListener('wheel', (e) => {
     e.preventDefault();
-    pushUndoOnce('zoom-' + cam);
+    pushUndoOnce('zoom-' + cam, 'zoom camera');
     const t = State.doc.cams[cam];
     t.scale = clamp(t.scale * Math.exp(-e.deltaY * 0.0018), 1, 4);
     applyCam(cam);
     scheduleSave();
   }, { passive: false });
   pane.addEventListener('dblclick', () => {
-    pushUndo();
+    pushUndo('reset camera framing');
     State.doc.cams[cam] = { scale: 1, x: 0, y: 0 };
     applyCam(cam);
     scheduleSave();
@@ -321,7 +322,7 @@ function buildCamRows() {
     row.querySelectorAll('input[type=range]').forEach((inp) => {
       inp.addEventListener('input', () => {
         const t = State.doc.cams[c.id];
-        pushUndoOnce('fr-' + inp.dataset.k + '-' + c.id);
+        pushUndoOnce('fr-' + inp.dataset.k + '-' + c.id, 'adjust framing');
         if (inp.dataset.k === 'scale') t.scale = Number(inp.value) / 100;
         else t[inp.dataset.k] = Number(inp.value);
         applyCam(c.id);
@@ -331,7 +332,7 @@ function buildCamRows() {
     row.querySelector('.cr-up').addEventListener('click', () => moveCam(c.id, -1));
     row.querySelector('.cr-down').addEventListener('click', () => moveCam(c.id, 1));
     row.querySelector('.cr-reset').addEventListener('click', () => {
-      pushUndo();
+      pushUndo('reset camera framing');
       State.doc.cams[c.id] = { scale: 1, x: 0, y: 0 };
       applyCam(c.id);
       scheduleSave();
@@ -340,7 +341,7 @@ function buildCamRows() {
   });
   // onclick (not addEventListener) so rebuilds after a reorder stay idempotent
   $('camResetAll').onclick = () => {
-    pushUndo();
+    pushUndo('reset all framing');
     for (const c of State.clips) {
       State.doc.cams[c.id] = { scale: 1, x: 0, y: 0 };
       applyCam(c.id);
@@ -377,7 +378,7 @@ function moveCam(camId, dir) {
   const L = State.doc.layout;
   const i = L.indexOf(camId), j = i + dir;
   if (i < 0 || j < 0 || j >= L.length) return;
-  pushUndo();
+  pushUndo('reorder cameras');
   [L[i], L[j]] = [L[j], L[i]];
   applyLayoutOrder();
   scheduleSave();
@@ -650,7 +651,7 @@ function bindTitleDrag() {
   });
   block.addEventListener('pointermove', (e) => {
     if (!drag || !State.previewTitle) return;
-    if (!drag.snapped) { pushUndo(); drag.snapped = true; }
+    if (!drag.snapped) { pushUndo('move title'); drag.snapped = true; }
     const box = $('titleOverlay').getBoundingClientRect();  // scaled rect — ok
     let cx = clamp((e.clientX - box.left) / box.width, 0, 1);
     let cy = clamp((e.clientY - box.top) / box.height, 0, 1);
@@ -670,7 +671,7 @@ function bindTitleDrag() {
 }
 
 function addTitle() {
-  pushUndo();
+  pushUndo('add title');
   const dur = outDur();
   const t = clamp(phOut(), 0, dur);          // reel-time position
   let tin = t, tout = Math.min(dur, t + TITLE_DEFAULT_LEN);
@@ -704,7 +705,7 @@ function selectTitle(idx, opts = {}) {
 
 function deleteTitle(idx) {
   if (idx < 0 || idx >= titles().length) return;
-  pushUndo();
+  pushUndo('delete title');
   titles().splice(idx, 1);
   if (State.selTitle === idx) State.selTitle = -1;
   else if (State.selTitle > idx) State.selTitle--;
@@ -755,7 +756,7 @@ function renderTitles() {
     const autosize = (el) => { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; };
     autosize(txt); autosize(sub);
     const bump = (d) => {
-      pushUndo();
+      pushUndo('title font size');
       t.scale = Math.round(clamp((t.scale || 1) + d, 0.4, 3) * 100) / 100;
       scaleEl.textContent = `${Math.round(t.scale * 100)}%`;
       invalidate(); scheduleSave();
@@ -777,11 +778,11 @@ function renderTitles() {
     txt.addEventListener('input', () => { t.text = txt.value; autosize(txt); invalidate(); scheduleSave(); drawTl(); });
     sub.addEventListener('input', () => { t.subtitle = sub.value; autosize(sub); scheduleSave(); });
     li.querySelector('[data-act=wrap]').addEventListener('change', (e) => {
-      e.stopPropagation(); pushUndo();
+      e.stopPropagation(); pushUndo('toggle title wrap');
       t.wrap = e.target.checked; invalidate(); scheduleSave();
     });
     li.querySelector('[data-act=center]').onclick = (e) => {
-      e.stopPropagation(); pushUndo();
+      e.stopPropagation(); pushUndo('recenter title');
       t.x = TITLE_DEF_X; t.y = TITLE_DEF_Y; scheduleSave();
     };
     li.querySelector('[data-act=del]').onclick = (e) => { e.stopPropagation(); deleteTitle(i); };
@@ -790,7 +791,7 @@ function renderTitles() {
 }
 
 function bumpGlobalFont(d) {
-  pushUndo();
+  pushUndo('global title font');
   State.doc.title_scale = Math.round(clamp(titleScale() + d, 0.4, 3) * 100) / 100;
   $('gFontScale').textContent = Math.round(titleScale() * 100) + '%';
   invalidate(); scheduleSave();
@@ -982,28 +983,25 @@ function bindTransport() {
   $('deleteBtn').addEventListener('click', deleteSelected);
   $('deleteMarkerBtn').addEventListener('click', deleteSelectedMarker);
   $('undoBtn').addEventListener('click', undo);
+  $('redoBtn').addEventListener('click', redo);
+  $('historyBtn').addEventListener('click', toggleHistory);
+  $('historyClose').addEventListener('click', toggleHistory);
 }
 
-/* ---------- editing ---------- */
-function pushUndo() {
-  State.undoStack.push(JSON.stringify({
+/* ---------- editing: undo / redo history ---------- */
+const HISTORY_MAX = 200;
+
+/* Serialize the parts of the doc that edits touch. */
+function historySnapshot() {
+  return JSON.stringify({
     segments: segs(), cams: State.doc.cams, layout: State.doc.layout,
     markers: State.doc.markers, titles: titles(),
     title_scale: State.doc.title_scale, selected: State.selected,
-  }));
-  if (State.undoStack.length > 120) State.undoStack.shift();
-  State._undoTag = null;
-  updateStatus();
+  });
 }
-/* Collapse a continuous gesture (drag/wheel/slider) into ONE undo step. */
-function pushUndoOnce(tag) {
-  if (State._undoTag === tag) return;
-  pushUndo();
-  State._undoTag = tag;
-}
-function undo() {
-  const snap = State.undoStack.pop();
-  if (!snap) return;
+
+/* Restore a serialized snapshot into the live doc + UI. */
+function historyRestore(snap) {
   const st = JSON.parse(snap);
   State.doc.segments = st.segments;
   State.doc.cams = st.cams;
@@ -1026,13 +1024,117 @@ function undo() {
   drawTl();
 }
 
+/* Record the state BEFORE an edit, tagged with what the edit was. Any new edit
+   invalidates the redo stack (standard linear-history behavior). */
+function pushUndo(label) {
+  State.undoStack.push({ snap: historySnapshot(), label: label || 'edit' });
+  if (State.undoStack.length > HISTORY_MAX) State.undoStack.shift();
+  State.redoStack = [];
+  State._undoTag = null;
+  updateHistory();
+}
+/* Collapse a continuous gesture (drag/wheel/slider) into ONE undo step. The
+   label follows the tag's first push. */
+function pushUndoOnce(tag, label) {
+  if (State._undoTag === tag) return;
+  pushUndo(label || tag);
+  State._undoTag = tag;
+}
+
+function undo() {
+  const entry = State.undoStack.pop();
+  if (!entry) return;
+  // stash the CURRENT state so redo can return to it, carrying the label of
+  // the action being undone
+  State.redoStack.push({ snap: historySnapshot(), label: entry.label });
+  historyRestore(entry.snap);
+  updateHistory();
+}
+
+function redo() {
+  const entry = State.redoStack.pop();
+  if (!entry) return;
+  State.undoStack.push({ snap: historySnapshot(), label: entry.label });
+  historyRestore(entry.snap);
+  updateHistory();
+}
+
+/* Jump directly to a point in history: repeatedly undo or redo until the
+   number of applied (undo) entries equals `targetUndoLen`. */
+function historyJumpTo(targetUndoLen) {
+  let guard = 0;
+  while (State.undoStack.length > targetUndoLen && guard++ < 500) {
+    const entry = State.undoStack.pop();
+    State.redoStack.push({ snap: historySnapshot(), label: entry.label });
+    historyRestore(entry.snap);
+  }
+  while (State.undoStack.length < targetUndoLen && State.redoStack.length && guard++ < 500) {
+    const entry = State.redoStack.pop();
+    State.undoStack.push({ snap: historySnapshot(), label: entry.label });
+    historyRestore(entry.snap);
+  }
+  updateHistory();
+}
+
+/* Refresh the undo/redo buttons + the history panel (if open). */
+function updateHistory() {
+  const uBtn = $('undoBtn'), rBtn = $('redoBtn');
+  if (uBtn) {
+    uBtn.disabled = !State.undoStack.length;
+    uBtn.textContent = State.undoStack.length
+      ? `↶ Undo ${State.undoStack[State.undoStack.length - 1].label}` : '↶ Undo';
+  }
+  if (rBtn) {
+    rBtn.disabled = !State.redoStack.length;
+    rBtn.textContent = State.redoStack.length
+      ? `↷ Redo ${State.redoStack[State.redoStack.length - 1].label}` : '↷ Redo';
+  }
+  const panel = $('historyPanel');
+  if (!panel || panel.hidden) return;
+  const ol = $('historyList');
+  ol.innerHTML = '';
+  // Build the visible list newest-first: redo entries (undone, top), then the
+  // current state, then the undo entries (past edits). A history slot i
+  // corresponds to "undoStack has i entries applied".
+  const rows = [];
+  // redo entries: applying them would grow undoStack to (undoLen+k)
+  const uLen = State.undoStack.length;
+  State.redoStack.slice().reverse().forEach((e, k) => {
+    rows.push({ label: e.label, target: uLen + State.redoStack.length - k, cls: 'h-undone' });
+  });
+  rows.push({ label: State.undoStack.length ? State.undoStack[uLen - 1].label : 'initial state',
+              target: uLen, cls: 'h-current' });
+  for (let i = uLen - 1; i >= 1; i--) {
+    rows.push({ label: State.undoStack[i - 1].label, target: i, cls: '' });
+  }
+  rows.push({ label: 'initial state', target: 0, cls: uLen === 0 ? 'h-current' : '' });
+  // de-dup the current row when uLen==0 (initial appears twice)
+  const seen = new Set();
+  rows.forEach((r) => {
+    if (r.target === 0 && seen.has(0)) return;
+    seen.add(r.target);
+    const li = document.createElement('li');
+    li.className = r.cls;
+    li.innerHTML = `<span class="h-dot"></span><span class="h-label">${
+      (r.label || 'edit').replace(/</g, '&lt;')}</span>`;
+    li.addEventListener('click', () => historyJumpTo(r.target));
+    ol.appendChild(li);
+  });
+}
+
+function toggleHistory() {
+  const p = $('historyPanel');
+  p.hidden = !p.hidden;
+  if (!p.hidden) updateHistory();
+}
+
 function splitAtPlayhead() {
   const i = State.ph.idx, s = segs()[i], t = State.ph.srcT;
   if (!s || t - s.in < 0.05 || s.out - t < 0.05) {
     flashSave('⚠ playhead too close to a cut');
     return;
   }
-  pushUndo();
+  pushUndo('split clip');
   segs().splice(i, 1,
     { in: s.in, out: Math.round(t * 1000) / 1000 },
     { in: Math.round(t * 1000) / 1000, out: s.out });
@@ -1046,7 +1148,7 @@ function splitAtPlayhead() {
 
 function deleteSelected() {
   if (!(State.selected >= 0 && segs().length > 1)) return;
-  pushUndo();
+  pushUndo('delete segment');
   const T = Math.min(phOut(), outBase(State.selected));
   segs().splice(State.selected, 1);
   State.selected = -1;
@@ -1172,6 +1274,7 @@ function loadDoc(doc) {
   State.selMarker = -1;
   State.selTitle = -1;
   State.undoStack = [];
+  State.redoStack = [];
   State._undoTag = null;
   applyLayoutOrder();            // panes/rows follow the doc's layout + cams
   fitView();
@@ -1372,7 +1475,7 @@ function addMarkerAtPlayhead() {
     flashSave('⚠ marker already at the playhead');
     return;
   }
-  pushUndo();
+  pushUndo('add marker');
   State.doc.markers.push({ t });
   State.doc.markers.sort((a, b) => a.t - b.t);
   State.selMarker = State.doc.markers.findIndex(m => m.t === t);
@@ -1385,7 +1488,7 @@ function addMarkerAtPlayhead() {
 
 function deleteSelectedMarker() {
   if (!(State.selMarker >= 0)) return;
-  pushUndo();
+  pushUndo('delete marker');
   State.doc.markers.splice(State.selMarker, 1);
   State.selMarker = -1;
   invalidate();
@@ -1674,7 +1777,7 @@ function tlDown(e) {
     State.selected = -1; State.selMarker = -1;
     const t = titles()[th.ti];
     if (th.edge) {
-      pushUndo();
+      pushUndo('trim title');
       // edge drag retimes the title in REEL (output) seconds — 1:1 with the x.
       Tl.drag = { mode: 'titletrim', ti: th.ti, edge: th.edge, lastX: x,
                   val: th.edge === 'in' ? t.in : t.out };
@@ -1691,7 +1794,7 @@ function tlDown(e) {
   const hit = hitTest(x);
   const onPlayhead = Math.abs(timeToX(phOut()) - x) <= 6;
   if (hit && hit.edge) {
-    pushUndo();
+    pushUndo('trim clip');
     State.selected = hit.idx;
     State.selMarker = -1; State.selTitle = -1;
     const s = segs()[hit.idx];
@@ -1732,7 +1835,7 @@ function moveTargetAt(dragX) {
    playhead on the moved clip. Shared by drag-drop and the [ ] keys. */
 function commitMove(i, k) {
   if (k === i || k === i + 1) return false;      // dropping where it already is
-  pushUndo();
+  pushUndo('move clip');
   const [seg] = segs().splice(i, 1);
   const at = k > i ? k - 1 : k;
   segs().splice(at, 0, seg);
@@ -1748,7 +1851,7 @@ function commitMove(i, k) {
 /* Duplicate the segment at `i`, inserting a COPY at insertion boundary `k`
    (the original stays put). ⌥-drag drop. */
 function commitDup(i, k) {
-  pushUndo();
+  pushUndo('duplicate clip');
   const src = segs()[i];
   const copy = { in: src.in, out: src.out };
   segs().splice(k, 0, copy);                     // k is a valid 0..n boundary
@@ -1876,7 +1979,12 @@ function bindKeys() {
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
-      e.preventDefault(); undo(); return;
+      e.preventDefault();
+      if (e.shiftKey) redo(); else undo();      // ⇧⌘Z = redo
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+      e.preventDefault(); redo(); return;        // Ctrl+Y = redo (Win convention)
     }
     if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) {
       e.preventDefault(); zoomAtPlayhead(1 / 1.6); return;

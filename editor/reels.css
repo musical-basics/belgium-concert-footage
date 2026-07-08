@@ -13,6 +13,32 @@
 /* Save button: highlight amber while there are unsaved edits. */
 #saveBtn.dirty { border-color: var(--warn); color: var(--warn); font-weight: 600; }
 
+/* edit-history popover */
+#historyPanel {
+  position: fixed; top: 46px; right: 14px; z-index: 50;
+  width: 300px; max-height: 70vh; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 11px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.5); overflow: hidden;
+}
+#historyPanel[hidden] { display: none; }
+.hist-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; border-bottom: 1px solid var(--line); font-weight: 600;
+}
+.hist-hint { color: var(--muted); font-size: 11px; margin: 8px 12px 4px; }
+#historyList { list-style: none; margin: 0; padding: 4px 6px 8px; overflow: auto; }
+#historyList li {
+  display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 12px;
+}
+#historyList li:hover { background: var(--panel2); }
+#historyList li .h-idx { color: var(--muted); font-variant-numeric: tabular-nums; width: 20px; text-align: right; flex: 0 0 auto; }
+#historyList li.h-current { background: rgba(79,140,255,0.16); border: 1px solid var(--accent); }
+#historyList li.h-undone { opacity: 0.5; }
+#historyList li.h-undone .h-label { text-decoration: line-through; }
+#historyList li .h-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+#historyList li.h-current .h-dot { background: var(--accent); }
+
 /* Title overlay covers the whole portrait stage (not a single pane). */
 #stage .title-overlay { inset: 0; left: 0; top: 0; width: 100%; height: 100%; z-index: 5; }
 .tfont-global { color: var(--muted); display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }

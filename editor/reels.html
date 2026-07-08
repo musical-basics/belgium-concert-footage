@@ -23,10 +23,22 @@
   <div class="spacer"></div>
   <a href="/" id="backLink" title="Back to the performance marker editor">⇠ Marker editor</a>
   <button id="undoBtn" title="Undo (⌘Z)" disabled>↶ Undo</button>
+  <button id="redoBtn" title="Redo (⇧⌘Z)" disabled>↷ Redo</button>
+  <button id="historyBtn" title="Show edit history">🕘 History</button>
   <button id="saveBtn" title="Save this reel now (⌘S) — edits also autosave a moment after each change">💾 Save</button>
   <button id="exportBtn" class="primary" title="Render the reel (1080×1920, all segments, mastered audio bed)">🎬 Export reel</button>
   <button id="openBtn" hidden title="Open the finished reel">▶ Open</button>
 </header>
+
+<div id="historyPanel" hidden>
+  <div class="hist-head">
+    <span>Edit history</span>
+    <button id="historyClose" class="small" title="Close">✕</button>
+  </div>
+  <p class="hist-hint">Click any step to jump there. Steps above the line are
+    undone; the highlighted row is the current state.</p>
+  <ol id="historyList"></ol>
+</div>
 
 <main id="reelsMain">
   <section id="stageWrap">
@@ -149,7 +161,7 @@
 </section>
 
 <footer id="help">
-  <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>S</b> split · <b>M</b> marker · <b>T</b> title · <b>[ ]</b> move clip earlier/later · <b>⌫</b> delete selection · <b>Esc</b> deselect · <b>⌘+ ⌘−</b> zoom at playhead · <b>+ −</b> zoom · <b>0 / ⌘0</b> fit · <b>⌘Z</b> undo · <b>⌘S</b> save · hold <b>Shift</b> while dragging = no snap
+  <b>Keys:</b> Space play/pause · ← → frame · Shift+← → ±5s · <b>S</b> split · <b>M</b> marker · <b>T</b> title · <b>[ ]</b> move clip earlier/later · <b>⌫</b> delete selection · <b>Esc</b> deselect · <b>⌘+ ⌘−</b> zoom at playhead · <b>+ −</b> zoom · <b>0 / ⌘0</b> fit · <b>⌘Z</b> undo · <b>⇧⌘Z</b> redo · <b>⌘S</b> save · hold <b>Shift</b> while dragging = no snap
 </footer>
 
 <script src="auth.js"></script>
