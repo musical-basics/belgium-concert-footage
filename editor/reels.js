@@ -124,6 +124,7 @@ async function boot() {
   bindExport();
   bindSave();
   bindTitles();
+  bindPanels();
   renderTitles();
   seekOut(0);
   updateStatus();
@@ -787,6 +788,95 @@ function bindTitles() {
   $('gFontDec').addEventListener('click', () => bumpGlobalFont(-0.1));
   $('gFontInc').addEventListener('click', () => bumpGlobalFont(+0.1));
   bindTitleDrag();
+}
+
+/* ---------- collapsible + reorderable side panels ----------
+ * Pure UI state persisted per-device in localStorage: which cards are
+ * collapsed, and their order. No server involvement. */
+const PANEL_ORDER_KEY = 'reels.panelOrder';
+const PANEL_COLLAPSE_KEY = 'reels.panelCollapsed';
+
+function bindPanels() {
+  const side = $('side');
+  const cards = () => Array.from(side.querySelectorAll('.card[data-card]'));
+
+  // restore saved order
+  try {
+    const order = JSON.parse(localStorage.getItem(PANEL_ORDER_KEY) || '[]');
+    if (Array.isArray(order) && order.length) {
+      const byId = {};
+      cards().forEach(c => { byId[c.dataset.card] = c; });
+      order.forEach(id => { if (byId[id]) side.appendChild(byId[id]); });
+    }
+  } catch (e) { /* ignore bad saved state */ }
+
+  // restore collapsed state
+  let collapsed = {};
+  try { collapsed = JSON.parse(localStorage.getItem(PANEL_COLLAPSE_KEY) || '{}') || {}; }
+  catch (e) { collapsed = {}; }
+
+  const saveOrder = () =>
+    localStorage.setItem(PANEL_ORDER_KEY, JSON.stringify(cards().map(c => c.dataset.card)));
+  const saveCollapsed = () => {
+    const st = {};
+    cards().forEach(c => { st[c.dataset.card] = c.classList.contains('collapsed'); });
+    localStorage.setItem(PANEL_COLLAPSE_KEY, JSON.stringify(st));
+  };
+
+  cards().forEach((card) => {
+    const head = card.querySelector('.card-head');
+    const toggle = card.querySelector('.card-toggle');
+    if (collapsed[card.dataset.card]) card.classList.add('collapsed');
+
+    const doToggle = () => { card.classList.toggle('collapsed'); saveCollapsed(); };
+    toggle.addEventListener('click', (e) => { e.stopPropagation(); doToggle(); });
+    // clicking the header background (not a control) also toggles
+    head.addEventListener('click', (e) => {
+      if (e.target.closest('button, input, select, .card-grip')) return;
+      doToggle();
+    });
+
+    // drag-to-reorder from the grip
+    const grip = card.querySelector('.card-grip');
+    grip.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      startPanelDrag(card, e, side, cards, saveOrder);
+    });
+  });
+}
+
+function startPanelDrag(card, e0, side, cards, saveOrder) {
+  card.classList.add('card-dragging');
+  let target = null, before = false;
+  const clear = () => cards().forEach(c => c.classList.remove('drop-before', 'drop-after'));
+
+  const move = (e) => {
+    const others = cards().filter(c => c !== card);
+    target = null;
+    for (const c of others) {
+      const r = c.getBoundingClientRect();
+      if (e.clientY >= r.top && e.clientY <= r.bottom) {
+        target = c; before = e.clientY < r.top + r.height / 2; break;
+      }
+      if (e.clientY < r.top) { target = c; before = true; break; }
+    }
+    clear();
+    if (target) target.classList.add(before ? 'drop-before' : 'drop-after');
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    card.classList.remove('card-dragging');
+    clear();
+    if (target && target !== card) {
+      if (before) side.insertBefore(card, target);
+      else side.insertBefore(card, target.nextSibling);
+      saveOrder();
+    }
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
 }
 
 /* ---------- playback ---------- */

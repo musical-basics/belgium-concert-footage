@@ -45,6 +45,29 @@
 
 /* ---- right column ---- */
 #side { flex: 1; display: flex; flex-direction: column; gap: 10px; overflow: auto; min-width: 340px; }
+
+/* collapsible + reorderable cards */
+#side .card { flex: 0 0 auto; overflow: visible; }
+#side .card-head { gap: 8px; cursor: default; justify-content: flex-start; }
+#side .card-head h3 { flex: 0 0 auto; }
+.card-grip {
+  cursor: grab; color: var(--muted); font-size: 13px; line-height: 1;
+  letter-spacing: -2px; padding: 2px 3px; user-select: none; flex: 0 0 auto;
+  border-radius: 4px;
+}
+.card-grip:hover { color: var(--text); background: var(--panel2); }
+.card-toggle {
+  flex: 0 0 auto; background: none; border: 0; color: var(--muted);
+  padding: 0 2px; font-size: 12px; cursor: pointer; transition: transform 0.12s;
+}
+.card-toggle:hover { color: var(--text); border: 0; }
+.card.collapsed .card-toggle { transform: rotate(-90deg); }
+.card.collapsed .card-body { display: none; }
+.card.collapsed { padding-bottom: 12px; }
+.card.card-dragging { opacity: 0.5; }
+.card.drop-before { box-shadow: 0 -3px 0 -1px var(--accent); }
+.card.drop-after { box-shadow: 0 3px 0 -1px var(--accent); }
+.card-body { min-width: 0; }
 #transport { display: flex; align-items: center; gap: 8px; }
 .tc-block { margin-left: 8px; }
 #transport .tc { font: 600 16px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
