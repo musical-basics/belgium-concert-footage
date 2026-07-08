@@ -528,6 +528,14 @@ function playAll() {
   $('playBtn').textContent = '❚❚ Pause';
   for (const id in State.videos) State.videos[id].play().catch(() => {});
 }
+/* Transport play: if a segment is selected, start from ITS beginning (unless
+   the playhead is already somewhere inside it); otherwise from the playhead. */
+function togglePlay() {
+  if (State.playing) { pauseAll(); return; }
+  const i = State.selected;
+  if (i >= 0 && i !== State.ph.idx) seekSrc(i, segs()[i].in);
+  playAll();
+}
 function pauseAll() {
   State.playing = false;
   $('playBtn').textContent = '▶︎ Play';
@@ -580,7 +588,7 @@ function tick() {
 }
 
 function bindTransport() {
-  $('playBtn').addEventListener('click', () => State.playing ? pauseAll() : playAll());
+  $('playBtn').addEventListener('click', () => togglePlay());
   document.querySelectorAll('[data-nudge]').forEach(b =>
     b.addEventListener('click', () =>
       seekOut(phOut() + Number(b.dataset.nudge) / State.fps)));
@@ -1117,14 +1125,33 @@ function drawTl() {
 }
 
 function hitTest(x) {
+  // Boundary xs: bnd[k] is the cut between clip k-1 and clip k (k = 0..n).
+  const n = segs().length;
+  const bnd = [];
   let base = 0;
-  for (let i = 0; i < segs().length; i++) {
-    const d = segs()[i].out - segs()[i].in;
-    const x0 = timeToX(base), x1 = timeToX(base + d);
-    if (Math.abs(x - x0) <= EDGE_PX) return { idx: i, edge: 'in' };
-    if (Math.abs(x - x1) <= EDGE_PX) return { idx: i, edge: 'out' };
-    if (x > x0 && x < x1) return { idx: i, edge: null };
-    base += d;
+  for (let i = 0; i < n; i++) { bnd.push(timeToX(base)); base += segs()[i].out - segs()[i].in; }
+  bnd.push(timeToX(base));
+
+  // Nearest boundary to the cursor; if within the handle zone it's an edge.
+  let k = 0, bd = Infinity;
+  for (let j = 0; j <= n; j++) {
+    const dd = Math.abs(x - bnd[j]);
+    if (dd < bd) { bd = dd; k = j; }
+  }
+  if (bd <= EDGE_PX) {
+    // An internal cut is shared by clip k-1's OUT and clip k's IN. Pick by the
+    // side of the cut the cursor is on so BOTH edges are reachable: left of the
+    // line trims the left clip's right edge, right of it the right clip's left.
+    const leftIdx = k - 1, rightIdx = k;
+    if (leftIdx < 0) return { idx: 0, edge: 'in' };
+    if (rightIdx >= n) return { idx: n - 1, edge: 'out' };
+    return x < bnd[k]
+      ? { idx: leftIdx, edge: 'out' }
+      : { idx: rightIdx, edge: 'in' };
+  }
+  // Otherwise, the body of whichever clip contains x.
+  for (let i = 0; i < n; i++) {
+    if (x > bnd[i] && x < bnd[i + 1]) return { idx: i, edge: null };
   }
   return null;
 }
@@ -1310,7 +1337,7 @@ function bindKeys() {
     switch (e.key) {
       case ' ':
         e.preventDefault();
-        State.playing ? pauseAll() : playAll();
+        togglePlay();
         break;
       case 'ArrowLeft':
         seekOut(phOut() + (e.shiftKey ? -5 : -1 / State.fps)); break;
