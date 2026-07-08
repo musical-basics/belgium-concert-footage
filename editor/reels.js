@@ -1164,14 +1164,19 @@ function drawTl() {
     ctx.lineWidth = 1;
     const gw = clamp(d / State.view.span * W, 26, 200);
     const gx = clamp(Tl.drag.x - gw / 2, 0, W - gw);
-    ctx.fillStyle = 'rgba(79,140,255,0.30)';
+    const dup = Tl.drag.dup;
+    ctx.fillStyle = dup ? 'rgba(52,211,153,0.30)' : 'rgba(79,140,255,0.30)';
     ctx.fillRect(gx, 28, gw, H - 42);
-    ctx.strokeStyle = '#4f8cff';
+    ctx.strokeStyle = dup ? '#34d399' : '#4f8cff';
     ctx.strokeRect(gx + 0.5, 28.5, gw - 1, H - 43);
     ctx.fillStyle = '#e6e9ef';
     ctx.font = '10px ui-monospace, Menlo, monospace';
-    const at = k > i ? k : k + 1;
-    ctx.fillText(`clip ${i + 1} (${d.toFixed(1)}s) → position ${at}`, gx + 5, 41);
+    // move: index shifts after removal (k>i ? k : k+1). dup: inserted at k, so
+    // the copy lands at position k+1 with the original left in place.
+    const at = dup ? k + 1 : (k > i ? k : k + 1);
+    ctx.fillText(
+      `${dup ? '⧉ copy of ' : ''}clip ${i + 1} (${d.toFixed(1)}s) → position ${at}`,
+      gx + 5, 41);
   }
 
   // playhead
@@ -1258,11 +1263,12 @@ function tlDown(e) {
                 val: hit.edge === 'in' ? s.in : s.out };
   } else if (hit && y > 20 && !onPlayhead) {
     // block body: click = select + seek; dragging >5px turns into a MOVE
-    // (reorder). Scrub-drags live on the ruler strip or the playhead itself.
+    // (reorder), or a DUPLICATE when ⌥/Alt is held at drag-start (drop a copy,
+    // leave the original). Scrub-drags live on the ruler strip / playhead.
     State.selected = hit.idx;
     State.selMarker = -1;
     seekOut(snapOut(xToTime(x), e.shiftKey));
-    Tl.drag = { mode: 'maybemove', idx: hit.idx, startX: x, x };
+    Tl.drag = { mode: 'maybemove', idx: hit.idx, startX: x, x, dup: e.altKey };
   } else {
     State.selected = hit ? hit.idx : -1;
     State.selMarker = -1;
@@ -1303,6 +1309,22 @@ function commitMove(i, k) {
   return true;
 }
 
+/* Duplicate the segment at `i`, inserting a COPY at insertion boundary `k`
+   (the original stays put). ⌥-drag drop. */
+function commitDup(i, k) {
+  pushUndo();
+  const src = segs()[i];
+  const copy = { in: src.in, out: src.out };
+  segs().splice(k, 0, copy);                     // k is a valid 0..n boundary
+  State.selected = k;                            // select the new copy
+  seekSrc(k, clamp(State.ph.srcT, copy.in, copy.out));
+  invalidate();
+  scheduleSave();
+  updateStatus();
+  drawTl();
+  return true;
+}
+
 function moveSelected(dir) {
   const i = State.selected;
   if (i < 0) return;
@@ -1315,7 +1337,8 @@ function tlUp() {
   Tl.drag = null;
   State._undoTag = null;
   if (d && d.mode === 'move') {
-    commitMove(d.idx, moveTargetAt(d.x));
+    if (d.dup) commitDup(d.idx, moveTargetAt(d.x));
+    else commitMove(d.idx, moveTargetAt(d.x));
     drawTl();
   }
 }
@@ -1345,8 +1368,8 @@ function tlMove(e) {
   }
   if (Tl.drag.mode === 'maybemove') {
     if (Math.abs(x - Tl.drag.startX) < 5) return;
-    Tl.drag = { mode: 'move', idx: Tl.drag.idx, x };
-    Tl.cvs.style.cursor = 'grabbing';
+    Tl.drag = { mode: 'move', idx: Tl.drag.idx, x, dup: Tl.drag.dup };
+    Tl.cvs.style.cursor = Tl.drag.dup ? 'copy' : 'grabbing';
   }
   if (Tl.drag.mode === 'move') {
     Tl.drag.x = clamp(x, 0, Tl.w);
