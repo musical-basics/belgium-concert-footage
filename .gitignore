@@ -28,10 +28,14 @@
 !/cache/waveform.json
 
 # Local runtime data — markers.db is the live store; markers.json is the
-# committed snapshot the render pipeline reads.
+# committed snapshot the render pipeline reads. reels live in markers.db now;
+# reels.json is a local mirror the renderer reads (regenerated on every save).
 *.db
 *.db-wal
 *.db-shm
+reels.json
+*.backup-*
+*.presqlite-*
 
 # Python
 __pycache__/

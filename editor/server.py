@@ -205,6 +205,35 @@ _SCHEMA = """
         id          INTEGER PRIMARY KEY CHECK (id = 1),
         write_count INTEGER NOT NULL DEFAULT 0
     );
+    -- Reels production interface: one row per reel PROJECT. `doc` is the full
+    -- reel document (segments + cams + layout + markers) as JSON. `pid` is the
+    -- stable project id the browser holds (a TEXT primary key, NOT a row that
+    -- gets regenerated) — this is what makes saves durable across resets.
+    CREATE TABLE IF NOT EXISTS reels (
+        pid       TEXT PRIMARY KEY,
+        name      TEXT NOT NULL,
+        doc       TEXT NOT NULL,
+        created   REAL NOT NULL,
+        modified  REAL NOT NULL,
+        active    INTEGER NOT NULL DEFAULT 0   -- 1 on exactly one row (the open project)
+    );
+    -- Singleton flag: 1 once the legacy reels.json has been imported, so the
+    -- one-time migration can never run twice (which would duplicate projects).
+    CREATE TABLE IF NOT EXISTS reels_meta (
+        id     INTEGER PRIMARY KEY CHECK (id = 1),
+        seeded INTEGER NOT NULL DEFAULT 0
+    );
+    -- Every reel save also drops a full-doc JSON snapshot here, so a bad
+    -- reset/overwrite is always recoverable (same idea as region_backups).
+    CREATE TABLE IF NOT EXISTS reels_backups (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        day        TEXT NOT NULL,
+        pid        TEXT NOT NULL,
+        name       TEXT,
+        n_segments INTEGER NOT NULL,
+        payload    TEXT NOT NULL
+    );
 """
 
 # Backup cadence + retention.
@@ -456,137 +485,256 @@ def _reels_default():
     }
 
 
-# reels.json is a multi-PROJECT store: each project ("Reel") is one full doc
-# (segments + cams + layout + markers) so every piece can have its own saved
-# cut. "New" projects start from the default doc = the ENTIRE show as one
-# compound clip. The renderer exports the `active` project (or --project ID).
-def _clean_project(p):
-    doc = clean_reels(p if isinstance(p, dict) else {})
-    doc["id"] = str(p.get("id") or uuid.uuid4().hex[:8])
-    doc["name"] = (str(p.get("name") or "").strip() or "Untitled reel")[:80]
-    doc["created"] = float(p.get("created") or time.time())
-    doc["modified"] = float(p.get("modified") or doc["created"])
+# Reels are stored in SQLite (markers.db, `reels` table): one row per project,
+# each holding the full doc as JSON keyed by a STABLE text `pid`. This is the
+# durable store — the old flat reels.json was fragile (an in-memory id keyed to
+# a file that could be reset out from under a live browser, dropping saves).
+# We still mirror the whole store to reels.json after every write for the
+# renderer and for hand-inspection, but the DB is the source of truth and
+# reels.json is NEVER deleted by the server.
+
+def _reels_row_to_project(row):
+    """DB row -> full project dict (doc fields + id/name/created/modified)."""
+    doc = clean_reels(json.loads(row["doc"]))
+    doc["id"] = row["pid"]
+    doc["name"] = row["name"]
+    doc["created"] = row["created"]
+    doc["modified"] = row["modified"]
     return doc
 
 
-def _reels_load_store():
-    """Load (and normalize) the project store; migrates a v1 single-doc file."""
-    raw = None
+def _reels_all(conn):
+    return [_reels_row_to_project(r) for r in conn.execute(
+        "SELECT pid, name, doc, created, modified, active FROM reels "
+        "ORDER BY created ASC")]
+
+
+def _reels_active_pid(conn):
+    row = conn.execute("SELECT pid FROM reels WHERE active = 1 LIMIT 1").fetchone()
+    if row:
+        return row["pid"]
+    row = conn.execute("SELECT pid FROM reels ORDER BY created ASC LIMIT 1").fetchone()
+    return row["pid"] if row else None
+
+
+def _reels_insert(conn, name, doc, active, now):
+    pid = uuid.uuid4().hex[:8]
+    conn.execute(
+        "INSERT INTO reels (pid, name, doc, created, modified, active) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (pid, name, json.dumps(doc), now, now, 1 if active else 0))
+    return pid
+
+
+def _reels_set_active(conn, pid):
+    conn.execute("UPDATE reels SET active = 0")
+    conn.execute("UPDATE reels SET active = 1 WHERE pid = ?", (pid,))
+
+
+def _reels_backup(conn, pid, name, doc, now):
+    """Snapshot this reel doc so any bad overwrite/reset stays recoverable."""
+    conn.execute(
+        "INSERT INTO reels_backups (created_at, day, pid, name, n_segments, payload) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (datetime.now().isoformat(timespec="seconds"),
+         datetime.now().strftime("%Y-%m-%d"), pid, name,
+         len(doc.get("segments") or []), json.dumps(doc)))
+    # keep the newest 200 snapshots per project, prune older
+    conn.execute(
+        "DELETE FROM reels_backups WHERE pid = ? AND id NOT IN "
+        "(SELECT id FROM reels_backups WHERE pid = ? ORDER BY id DESC LIMIT 200)",
+        (pid, pid))
+
+
+def _reels_ensure_seed(conn):
+    """First run only: migrate the legacy reels.json if present, else seed one
+    full-show project. Guarded by a one-time flag in backup_state so the JSON
+    import can NEVER run twice (which would duplicate every project). Leaves
+    >=1 row + exactly one active."""
+    # one-time seed flag
+    conn.execute("INSERT OR IGNORE INTO reels_meta (id, seeded) VALUES (1, 0)")
+    seeded = conn.execute("SELECT seeded FROM reels_meta WHERE id = 1").fetchone()["seeded"]
+    has_rows = conn.execute("SELECT COUNT(*) AS c FROM reels").fetchone()["c"]
+    if seeded or has_rows:
+        # already seeded once (or rows exist) — just guarantee an active row
+        if has_rows and not conn.execute(
+                "SELECT 1 FROM reels WHERE active = 1 LIMIT 1").fetchone():
+            first = conn.execute(
+                "SELECT pid FROM reels ORDER BY created ASC LIMIT 1").fetchone()
+            _reels_set_active(conn, first["pid"])
+        conn.execute("UPDATE reels_meta SET seeded = 1 WHERE id = 1")
+        return
+    now = time.time()
+    migrated = False
     if os.path.isfile(REELS_JSON):
         try:
             with open(REELS_JSON) as f:
                 raw = json.load(f)
         except Exception:
             raw = None
-    if raw is None:
-        proj = _clean_project({"name": "Reel 1"})
-        return {"version": 2, "active": proj["id"], "projects": [proj]}
-    if "projects" not in raw:                    # v1: one bare doc at top level
-        proj = _clean_project({**raw, "name": "Reel 1"})
-        return {"version": 2, "active": proj["id"], "projects": [proj]}
-    projects = [_clean_project(p) for p in (raw.get("projects") or [])]
-    if not projects:
-        projects = [_clean_project({"name": "Reel 1"})]
-    active = raw.get("active")
-    if active not in {p["id"] for p in projects}:
-        active = projects[0]["id"]
-    return {"version": 2, "active": active, "projects": projects}
+        if isinstance(raw, dict):
+            projs = raw.get("projects") if "projects" in raw else [
+                {**raw, "name": "Reel 1"}]
+            active_id = raw.get("active")
+            for i, p in enumerate(projs or []):
+                try:
+                    doc = clean_reels(p)
+                except Exception:
+                    continue
+                name = (str(p.get("name") or "").strip() or f"Reel {i + 1}")[:80]
+                created = float(p.get("created") or now)
+                pid = uuid.uuid4().hex[:8]
+                conn.execute(
+                    "INSERT INTO reels (pid, name, doc, created, modified, active) "
+                    "VALUES (?, ?, ?, ?, ?, 0)",
+                    (pid, name, json.dumps(doc), created,
+                     float(p.get("modified") or created)))
+                migrated = True
+    if not migrated:
+        _reels_insert(conn, "Reel 1", _reels_default(), True, now)
+    # make sure exactly one row is active
+    if not conn.execute("SELECT 1 FROM reels WHERE active = 1 LIMIT 1").fetchone():
+        first = conn.execute("SELECT pid FROM reels ORDER BY created ASC LIMIT 1").fetchone()
+        if first:
+            _reels_set_active(conn, first["pid"])
+    conn.execute("UPDATE reels_meta SET seeded = 1 WHERE id = 1")   # mark seeded
 
 
-def _reels_write_store(store):
-    tmp = REELS_JSON + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(store, f, indent=1)
-    os.replace(tmp, REELS_JSON)
+def _reels_mirror_json(conn):
+    """Write the whole store to reels.json (renderer input + inspection). Best
+    effort; a failure here never blocks a DB save. reels.json is only ever
+    (over)written, NEVER deleted."""
+    try:
+        projects = _reels_all(conn)
+        store = {"version": 2, "active": _reels_active_pid(conn),
+                 "projects": projects}
+        tmp = REELS_JSON + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(store, f, indent=1)
+        os.replace(tmp, REELS_JSON)
+    except Exception:
+        pass
 
 
-def _reels_find(store, pid):
-    return next((p for p in store["projects"] if p["id"] == pid), None)
-
-
-def _reels_meta(store):
+def _reels_meta(projects):
     return [{"id": p["id"], "name": p["name"], "modified": p["modified"],
              "segments": len(p["segments"]),
              "reel": round(sum(s["out"] - s["in"] for s in p["segments"]), 3)}
-            for p in store["projects"]]
+            for p in projects]
 
 
-def _reels_state(store):
-    return {"active": store["active"], "projects": _reels_meta(store),
-            "doc": _reels_find(store, store["active"])}
+def _reels_state_from(conn):
+    projects = _reels_all(conn)
+    active = _reels_active_pid(conn)
+    doc = next((p for p in projects if p["id"] == active), projects[0] if projects else None)
+    return {"active": active, "projects": _reels_meta(projects), "doc": doc}
 
 
 def reels_state():
-    with _REELS_LOCK:
-        store = _reels_load_store()
-        _reels_write_store(store)     # persist ids assigned during normalize
-        return _reels_state(store)
+    with _DB_LOCK:
+        with db_connect() as conn:
+            _reels_ensure_seed(conn)
+            st = _reels_state_from(conn)
+            _reels_mirror_json(conn)
+        return st
 
 
 def reels_save(body):
     """Save one project's doc (default: the active one) and make it active.
-    Returns the cleaned doc, or None for an unknown project id."""
-    with _REELS_LOCK:
-        store = _reels_load_store()
-        pid = str(body.get("project") or store["active"])
-        p = _reels_find(store, pid)
-        if p is None:
-            return None
-        doc = clean_reels(body)
-        doc.update({"id": p["id"], "name": p["name"], "created": p["created"],
-                    "modified": time.time()})
-        store["projects"][store["projects"].index(p)] = doc
-        store["active"] = pid
-        _reels_write_store(store)
-        return doc
+
+    NEVER drops the incoming edit: if the pid isn't in the DB (e.g. the browser
+    holds an id from before a reset), we INSERT it with that pid so the work is
+    preserved. Every save also writes a backup snapshot."""
+    with _DB_LOCK:
+        with db_connect() as conn:
+            _reels_ensure_seed(conn)
+            now = time.time()
+            pid = str(body.get("project") or _reels_active_pid(conn) or "")
+            doc = clean_reels(body)
+            row = conn.execute("SELECT pid, name FROM reels WHERE pid = ?",
+                               (pid,)).fetchone() if pid else None
+            if row is None:
+                # orphaned/absent pid — resurrect it verbatim so nothing is lost
+                if not pid:
+                    pid = uuid.uuid4().hex[:8]
+                name = (str(body.get("name") or "").strip() or "Recovered reel")[:80]
+                conn.execute(
+                    "INSERT INTO reels (pid, name, doc, created, modified, active) "
+                    "VALUES (?, ?, ?, ?, ?, 0)",
+                    (pid, name, json.dumps(doc), now, now))
+            else:
+                name = row["name"]
+                conn.execute(
+                    "UPDATE reels SET doc = ?, modified = ? WHERE pid = ?",
+                    (json.dumps(doc), now, pid))
+            _reels_set_active(conn, pid)
+            _reels_backup(conn, pid, name, doc, now)
+            _reels_mirror_json(conn)
+        # return the freshly-saved doc (full, incl. id/name)
+        return {**doc, "id": pid, "name": name,
+                "created": now, "modified": now}
 
 
 def reels_new(name):
-    with _REELS_LOCK:
-        store = _reels_load_store()
-        proj = _clean_project(
-            {"name": name or f"Reel {len(store['projects']) + 1}"})
-        store["projects"].append(proj)
-        store["active"] = proj["id"]
-        _reels_write_store(store)
-        return _reels_state(store)
+    with _DB_LOCK:
+        with db_connect() as conn:
+            _reels_ensure_seed(conn)
+            now = time.time()
+            n = conn.execute("SELECT COUNT(*) AS c FROM reels").fetchone()["c"]
+            nm = (str(name or "").strip() or f"Reel {n + 1}")[:80]
+            pid = _reels_insert(conn, nm, _reels_default(), False, now)
+            _reels_set_active(conn, pid)
+            st = _reels_state_from(conn)
+            _reels_mirror_json(conn)
+        return st
 
 
 def reels_open(pid):
-    with _REELS_LOCK:
-        store = _reels_load_store()
-        if _reels_find(store, pid) is None:
-            return None
-        store["active"] = pid
-        _reels_write_store(store)
-        return _reels_state(store)
+    with _DB_LOCK:
+        with db_connect() as conn:
+            _reels_ensure_seed(conn)
+            if conn.execute("SELECT 1 FROM reels WHERE pid = ?", (pid,)).fetchone() is None:
+                return None
+            _reels_set_active(conn, pid)
+            st = _reels_state_from(conn)
+            _reels_mirror_json(conn)
+        return st
 
 
 def reels_rename(pid, name):
-    with _REELS_LOCK:
-        store = _reels_load_store()
-        p = _reels_find(store, pid)
-        if p is None or not str(name or "").strip():
-            return None
-        p["name"] = str(name).strip()[:80]
-        p["modified"] = time.time()
-        _reels_write_store(store)
-        return _reels_state(store)
+    name = str(name or "").strip()
+    if not name:
+        return None
+    with _DB_LOCK:
+        with db_connect() as conn:
+            _reels_ensure_seed(conn)
+            cur = conn.execute("UPDATE reels SET name = ?, modified = ? WHERE pid = ?",
+                               (name[:80], time.time(), pid))
+            if cur.rowcount == 0:
+                return None
+            st = _reels_state_from(conn)
+            _reels_mirror_json(conn)
+        return st
 
 
 def reels_delete(pid):
-    with _REELS_LOCK:
-        store = _reels_load_store()
-        p = _reels_find(store, pid)
-        if p is None:
-            return None
-        store["projects"].remove(p)
-        if not store["projects"]:
-            store["projects"] = [_clean_project({"name": "Reel 1"})]
-        if store["active"] == pid:
-            store["active"] = store["projects"][0]["id"]
-        _reels_write_store(store)
-        return _reels_state(store)
+    with _DB_LOCK:
+        with db_connect() as conn:
+            _reels_ensure_seed(conn)
+            row = conn.execute("SELECT active FROM reels WHERE pid = ?", (pid,)).fetchone()
+            if row is None:
+                return None
+            was_active = row["active"]
+            conn.execute("DELETE FROM reels WHERE pid = ?", (pid,))
+            if conn.execute("SELECT COUNT(*) AS c FROM reels").fetchone()["c"] == 0:
+                _reels_insert(conn, "Reel 1", _reels_default(), True, time.time())
+            elif was_active:
+                first = conn.execute(
+                    "SELECT pid FROM reels ORDER BY created ASC LIMIT 1").fetchone()
+                _reels_set_active(conn, first["pid"])
+            st = _reels_state_from(conn)
+            _reels_mirror_json(conn)
+        return st
 
 
 def clean_reels(raw):
