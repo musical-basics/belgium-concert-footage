@@ -61,6 +61,69 @@ def probe_dims(path):
     return _DIMS_CACHE[path]
 
 
+def title_filter(titles, seg_in, seg_out, work_dir, key, gscale, pw, ph):
+    """drawtext chain for titles overlapping this segment's concert window.
+
+    Mirrors render.py's title_filter but for the PORTRAIT frame: fontsize and
+    the vertical block layout use the reel's real height `ph` (1920), the wrap
+    widths use the same base char counts, and x/y are normalized over the
+    reel frame (x*pw, y*ph). Times are shifted by -seg_in since each output
+    segment restarts at 0. '' when nothing overlaps."""
+    style = (f"fontfile='{R.TITLE_FONT}':fontcolor=white:borderw=4:"
+             f"bordercolor=black@0.9:shadowcolor=black@0.55:shadowx=2:shadowy=3")
+    parts = []
+    for n, ttl in enumerate(titles):
+        a = max(0.0, float(ttl["in"]) - seg_in)
+        b = min(seg_out, float(ttl["out"])) - seg_in
+        if b - a <= 0.05:
+            continue
+        fd = min(0.4, max(0.05, (b - a) / 2))
+        s = gscale * (float(ttl["scale"]) if ttl.get("scale") else 1.0)
+        fs_main, fs_sub = round(ph / 16 * s), round(ph / 27 * s)
+        lh_main, lh_sub = fs_main * 1.18, fs_sub * 1.25
+        cx = 0.5 if ttl.get("x") is None else float(ttl["x"])
+        cy = 0.80 if ttl.get("y") is None else float(ttl["y"])
+        x_expr = f"(w*{cx:.4f}-text_w/2)"
+        alpha = (f"alpha='if(lt(t,{a:.3f}),0,if(lt(t,{a + fd:.3f}),"
+                 f"(t-{a:.3f})/{fd:.3f},if(lt(t,{b - fd:.3f}),1,"
+                 f"if(lt(t,{b:.3f}),({b:.3f}-t)/{fd:.3f},0))))'")
+        tail = f"x={x_expr}:enable='between(t,{a:.3f},{b:.3f})':{alpha}"
+        mains = _wrap((ttl.get("text") or "").strip(), max(6, round(40 / s)))
+        subs = _wrap((ttl.get("subtitle") or "").strip(), max(8, round(56 / s)))
+        gap = fs_main * 0.5 if (mains and subs) else 0
+        block_h = len(mains) * lh_main + gap + len(subs) * lh_sub
+        y0 = cy * ph - block_h / 2
+        for li, line in enumerate(mains):
+            tf = os.path.join(work_dir, f"ttl_{key}_{n}_m{li}.txt")
+            with open(tf, "w") as f:
+                f.write(line)
+            parts.append(f"drawtext=textfile='{tf}':{style}:fontsize={fs_main}:"
+                         f"y={round(y0 + li * lh_main)}:{tail}")
+        sy0 = y0 + len(mains) * lh_main + gap
+        for li, line in enumerate(subs):
+            tf = os.path.join(work_dir, f"ttl_{key}_{n}_s{li}.txt")
+            with open(tf, "w") as f:
+                f.write(line)
+            parts.append(f"drawtext=textfile='{tf}':{style}:fontsize={fs_sub}:"
+                         f"y={round(sy0 + li * lh_sub)}:{tail}")
+    return ",".join(parts)
+
+
+def _wrap(text, max_chars):
+    if not text:
+        return []
+    lines, cur = [], ""
+    for word in text.split():
+        if cur and len(cur) + 1 + len(word) > max_chars:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}" if cur else word
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def cam_chain(cam, transform, pane_w, pane_h):
     """Per-camera grade + cover-fit scale/pan-crop into its pane.
 
@@ -155,6 +218,8 @@ def main():
     # Per-camera pane chains are cut-independent — build them once.
     chains = [cam_chain(cam, cams_cfg.get(cam, {}), pw, pane_hs[i])
               for i, cam in enumerate(layout)]
+    titles = doc.get("titles") or []
+    tscale = float(doc.get("title_scale") or 1.0)
 
     vlist = os.path.join(seg_dir, "concat_v.txt")
     alist = os.path.join(seg_dir, "concat_a.txt")
@@ -167,8 +232,11 @@ def main():
                 inputs += [*hw, "-ss", f"{t_in:.3f}", "-i", R.src_path(cam)]
             fc = ";".join(f"[{i}:v]{chains[i]}[v{i}]" for i in range(n))
             stack = "".join(f"[v{i}]" for i in range(n))
+            # titles burn onto the full portrait frame, after the vstack
+            tvf = title_filter(titles, t_in, t_out, seg_dir, k, tscale, pw, ph)
+            post = f",{tvf}" if tvf else ""
             fc += (f";{stack}vstack=inputs={n},format=yuv420p,"
-                   f"setpts=PTS-STARTPTS[v]")
+                   f"setpts=PTS-STARTPTS{post}[v]")
             vout = os.path.join(seg_dir, f"seg_{k:03d}.mp4")
             R.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                    *inputs, "-t", f"{dur:.3f}", "-filter_complex", fc,

@@ -482,6 +482,8 @@ def _reels_default():
         "cams": {cid: {"scale": 1.0, "x": 0.0, "y": 0.0} for cid in _REELS_CAM_IDS},
         "segments": [{"in": 0.0, "out": round(dur, 3)}],
         "markers": [],
+        "titles": [],
+        "title_scale": 1.0,
     }
 
 
@@ -781,6 +783,42 @@ def clean_reels(raw):
         marks.append(entry)
     marks.sort(key=lambda m: m["t"])
     doc["markers"] = marks
+    # Titles: text overlays burned into the reel. in/out are concert seconds;
+    # x/y are normalized 0..1 over the whole 1080x1920 frame; scale is a font
+    # multiplier (same model as the main editor's titles).
+    titles = []
+    for t in (raw.get("titles") or [])[:200]:
+        try:
+            ti = max(0.0, min(dur, float(t["in"])))
+            to = max(0.0, min(dur, float(t["out"])))
+        except (TypeError, ValueError, KeyError):
+            continue
+        if to - ti < 0.05:
+            continue
+        entry = {
+            "text": str(t.get("text") or "")[:200],
+            "subtitle": str(t.get("subtitle") or "")[:200],
+            "in": round(ti, 3), "out": round(to, 3),
+        }
+        try:
+            entry["x"] = max(0.0, min(1.0, float(t["x"])))
+        except (TypeError, ValueError, KeyError):
+            entry["x"] = None
+        try:
+            entry["y"] = max(0.0, min(1.0, float(t["y"])))
+        except (TypeError, ValueError, KeyError):
+            entry["y"] = None
+        try:
+            entry["scale"] = max(0.4, min(3.0, float(t.get("scale", 1.0))))
+        except (TypeError, ValueError):
+            entry["scale"] = 1.0
+        titles.append(entry)
+    titles.sort(key=lambda t: t["in"])
+    doc["titles"] = titles
+    try:
+        doc["title_scale"] = max(0.4, min(3.0, float(raw.get("title_scale", 1.0))))
+    except (TypeError, ValueError):
+        doc["title_scale"] = 1.0
     return doc
 
 

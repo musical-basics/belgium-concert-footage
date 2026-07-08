@@ -19,6 +19,12 @@ const OUT_W = 1080, OUT_H = 1920;
 const SRC_W = 1920, SRC_H = 1080;          // all three stationary cameras
 const MIN_SEG = 0.1;                        // shortest segment (s)
 const EDGE_PX = 6;                          // trim-handle hit zone
+// Titles (same model/constants as the main editor).
+const TITLE_DEF_X = 0.5, TITLE_DEF_Y = 0.80;
+const TITLE_MAIN_MAX_CHARS = 40, TITLE_SUB_MAX_CHARS = 56;
+const TITLE_DEFAULT_LEN = 4;                // seconds for a fresh title
+const TITLE_SNAP_TOL = 0.015;               // center-lock pull radius (Shift disables)
+const TITLE_LANE_Y = 0, TITLE_LANE_H = 15;  // purple lane at the very top of the timeline
 
 const State = {
   fps: 60,
@@ -33,6 +39,9 @@ const State = {
   playing: false,
   selected: -1,
   selMarker: -1,
+  selTitle: -1,                             // selected title index (-1 none)
+  previewTitle: null,                       // title under the playhead (drag target)
+  snap: { x: false, y: false },             // center-lock guide state
   view: { start: 0, span: 60 },             // timeline window (output time)
   wave: { ready: false, peaks: null, pps: 100 },
   undoStack: [],
@@ -96,6 +105,8 @@ async function boot() {
   State.projectId = reels.active;
   State.doc = reels.doc;
   State.doc.markers = State.doc.markers || [];
+  State.doc.titles = State.doc.titles || [];
+  if (State.doc.title_scale == null) State.doc.title_scale = 1;
   const byId = {};
   for (const c of meta.clips) byId[c.id] = c;
   State.clips = State.doc.layout.map(id => byId[id]).filter(Boolean);
@@ -112,6 +123,8 @@ async function boot() {
   bindKeys();
   bindExport();
   bindSave();
+  bindTitles();
+  renderTitles();
   seekOut(0);
   updateStatus();
   setSaveBtn('saved');
@@ -149,9 +162,13 @@ function updateStatus() {
   const mk = State.doc.markers[State.selMarker];
   $('deleteMarkerBtn').hidden = !mk;
   const sel = segs()[State.selected];
+  const tt = titles()[State.selTitle];
   $('segInfo').innerHTML = mk
     ? `Marker <b>${State.selMarker + 1}</b> ⚑ concert <b>${fmtSrc(mk.t)}</b>` +
       (mk.label ? ` · ${mk.label}` : '') + ' · <b>⌫</b> deletes'
+    : tt
+    ? `Title <b>“${(tt.text || 'Title').slice(0, 24)}”</b> · concert ` +
+      `<b>${fmtSrc(tt.in)}</b> → <b>${fmtSrc(tt.out)}</b> · <b>⌫</b> deletes`
     : sel
     ? `Segment <b>${State.selected + 1}/${n}</b> · concert <b>${fmtSrc(sel.in)}</b> → ` +
       `<b>${fmtSrc(sel.out)}</b> · <b>${(sel.out - sel.in).toFixed(2)}s</b>`
@@ -162,6 +179,7 @@ function updateStatus() {
 /* ---------- stage: stacked panes + XY framing ---------- */
 function buildStage() {
   const stage = $('stage');
+  const overlay = $('titleOverlay');            // preserve across rebuilds
   stage.innerHTML = '';
   const n = State.clips.length;
   const paneH = Math.floor(OUT_H / n);
@@ -186,6 +204,7 @@ function buildStage() {
     bindPane(pane, c.id);
     applyCam(c.id);
   });
+  if (overlay) stage.appendChild(overlay);      // keep the title overlay on top
   if (!State.master) State.master = State.videos[State.clips[0].id];
 }
 
@@ -377,6 +396,8 @@ function applyLayoutOrder() {
     stage.appendChild(pane);      // append in order = final stack order
     applyCam(c.id);
   });
+  const overlay = $('titleOverlay');
+  if (overlay) stage.appendChild(overlay);   // keep overlay last (on top)
   buildCamRows();
   buildColorRows();
   updateStatus();
@@ -535,6 +556,239 @@ function buildColorRows() {
   };
 }
 
+/* ---------- titles (text overlays burned into the reel) ----------
+ * Same model as the main editor: {text, subtitle, in, out, x, y, scale} with
+ * in/out in CONCERT seconds (so a title shows wherever that concert moment
+ * lands in the reel, even on a duplicated clip), x/y normalized 0..1 over the
+ * 1080x1920 frame, scale a font multiplier. The stage is real output pixels
+ * scaled by stageK, so the overlay covers the whole stage and font sizes use
+ * OUT_H directly — the CSS scale() keeps it WYSIWYG with the export. */
+function titles() { return State.doc.titles; }
+function titleScale() { return State.doc.title_scale || 1; }
+
+function wrapText(s, max) {
+  const lines = []; let cur = '';
+  for (const w of (s || '').split(/\s+/).filter(Boolean)) {
+    if (cur && (cur.length + 1 + w.length) > max) { lines.push(cur); cur = w; }
+    else cur = cur ? `${cur} ${w}` : w;
+  }
+  if (cur) lines.push(cur);
+  return lines.join('\n');
+}
+
+/* The title whose concert window contains the playhead's concert time (topmost
+   wins). Drives the live preview + is the drag target. */
+function activeTitleAt(srcT) {
+  let active = null;
+  for (const t of titles()) if (srcT >= t.in && srcT <= t.out) active = t;
+  return active;
+}
+
+/* Update the on-stage overlay for the current playhead. Called each frame. */
+function updateTitleOverlay() {
+  const box = $('titleOverlay');
+  if (!box) return;
+  const active = activeTitleAt(State.ph.srcT);
+  const has = !!active && !!(((active.text || '').trim()) || ((active.subtitle || '').trim()));
+  State.previewTitle = has ? active : null;
+  if (!has) { if (!box.hidden) box.hidden = true; return; }
+  // symmetric fade (mirrors the render's alpha ramp)
+  const fd = Math.min(0.4, Math.max(0.05, (active.out - active.in) / 2));
+  let op = 1;
+  if (State.ph.srcT < active.in + fd) op = (State.ph.srcT - active.in) / fd;
+  else if (State.ph.srcT > active.out - fd) op = (active.out - State.ph.srcT) / fd;
+  op = Math.max(0, Math.min(1, op));
+  const cx = active.x == null ? TITLE_DEF_X : active.x;
+  const cy = active.y == null ? TITLE_DEF_Y : active.y;
+  const es = titleScale() * (active.scale || 1);
+  const main = box.querySelector('.to-main'), sub = box.querySelector('.to-sub');
+  main.textContent = wrapText(active.text || '', Math.max(6, Math.round(TITLE_MAIN_MAX_CHARS / es)));
+  main.style.display = (active.text || '').trim() ? '' : 'none';
+  sub.textContent = wrapText(active.subtitle || '', Math.max(8, Math.round(TITLE_SUB_MAX_CHARS / es)));
+  sub.style.display = (active.subtitle || '').trim() ? '' : 'none';
+  // fonts in OUTPUT pixels — the stage scale() transform shrinks to screen
+  main.style.fontSize = (OUT_H / 16 * es) + 'px';
+  sub.style.fontSize = (OUT_H / 27 * es) + 'px';
+  main.style.whiteSpace = 'pre';
+  sub.style.whiteSpace = 'pre';
+  const block = box.querySelector('.to-block');
+  block.style.left = (cx * 100) + '%';
+  block.style.top = (cy * 100) + '%';
+  box.style.opacity = op.toFixed(2);
+  box.classList.toggle('snap-x', State.snap.x);
+  box.classList.toggle('snap-y', State.snap.y);
+  if (box.hidden) box.hidden = false;
+}
+
+/* Drag the title block on the stage to set the active title's x/y (0..1),
+   with FCP-style center snapping (Shift disables). */
+function bindTitleDrag() {
+  const block = $('titleOverlay').querySelector('.to-block');
+  let drag = null;
+  block.addEventListener('pointerdown', (e) => {
+    if (!State.previewTitle) return;
+    e.preventDefault(); e.stopPropagation();
+    block.setPointerCapture(e.pointerId);
+    drag = { snapped: false };
+    const idx = titles().indexOf(State.previewTitle);
+    if (idx >= 0) selectTitle(idx, { seek: false });
+  });
+  block.addEventListener('pointermove', (e) => {
+    if (!drag || !State.previewTitle) return;
+    if (!drag.snapped) { pushUndo(); drag.snapped = true; }
+    const box = $('titleOverlay').getBoundingClientRect();  // scaled rect — ok
+    let cx = clamp((e.clientX - box.left) / box.width, 0, 1);
+    let cy = clamp((e.clientY - box.top) / box.height, 0, 1);
+    let sx = false, sy = false;
+    if (!e.shiftKey) {
+      if (Math.abs(cx - 0.5) <= TITLE_SNAP_TOL) { cx = 0.5; sx = true; }
+      if (Math.abs(cy - 0.5) <= TITLE_SNAP_TOL) { cy = 0.5; sy = true; }
+    }
+    State.snap = { x: sx, y: sy };
+    State.previewTitle.x = +cx.toFixed(4);
+    State.previewTitle.y = +cy.toFixed(4);
+    scheduleSave();
+  });
+  const end = () => { if (drag) { drag = null; State.snap = { x: false, y: false }; renderTitles(); } };
+  block.addEventListener('pointerup', end);
+  block.addEventListener('pointercancel', end);
+}
+
+function addTitle() {
+  pushUndo();
+  const t = State.ph.srcT;
+  let tin = t, tout = Math.min(State.duration, t + TITLE_DEFAULT_LEN);
+  if (tout - tin < 1) tin = Math.max(0, tout - TITLE_DEFAULT_LEN);
+  const title = { text: 'Title', subtitle: '', in: +tin.toFixed(3), out: +tout.toFixed(3),
+                  x: TITLE_DEF_X, y: TITLE_DEF_Y, scale: 1 };
+  titles().push(title);
+  titles().sort((a, b) => a.in - b.in);
+  State.selTitle = titles().indexOf(title);
+  State.selected = -1; State.selMarker = -1;
+  invalidate();
+  scheduleSave();
+  renderTitles();
+  updateStatus();
+  drawTl();
+  const inp = document.querySelector(`#titleList li[data-i="${State.selTitle}"] .ttext`);
+  if (inp) { inp.focus(); inp.select(); }
+}
+
+function selectTitle(idx, opts = {}) {
+  const { seek = true } = opts;
+  State.selTitle = idx;
+  State.selected = -1; State.selMarker = -1;
+  const t = titles()[idx];
+  if (seek && t) {
+    const ot = outputTimeOfConcert(t.in);
+    if (ot != null) seekOut(clamp(ot, 0, outDur()));
+  }
+  invalidate();
+  renderTitles();
+  updateStatus();
+  drawTl();
+}
+
+/* First output time at which concert time `srcT` is shown (or null). */
+function outputTimeOfConcert(srcT) {
+  let base = 0;
+  for (const s of segs()) {
+    if (srcT >= s.in && srcT <= s.out) return base + (srcT - s.in);
+    base += s.out - s.in;
+  }
+  return null;
+}
+
+function deleteTitle(idx) {
+  if (idx < 0 || idx >= titles().length) return;
+  pushUndo();
+  titles().splice(idx, 1);
+  if (State.selTitle === idx) State.selTitle = -1;
+  else if (State.selTitle > idx) State.selTitle--;
+  invalidate();
+  scheduleSave();
+  renderTitles();
+  updateStatus();
+  drawTl();
+}
+
+function renderTitles() {
+  const ol = $('titleList'); if (!ol) return;
+  ol.innerHTML = '';
+  $('titleCount').textContent = titles().length;
+  $('gFontScale').textContent = Math.round(titleScale() * 100) + '%';
+  if (!titles().length) {
+    ol.innerHTML = '<li class="title-empty">No titles yet — click “＋ Create title”.</li>';
+    return;
+  }
+  const esc = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  titles().forEach((t, i) => {
+    const li = document.createElement('li');
+    li.className = i === State.selTitle ? 'sel' : '';
+    li.dataset.i = i;
+    li.innerHTML =
+      `<span class="tnum">${i + 1}</span>` +
+      `<span class="tmeta">` +
+      `<input class="ttext" type="text" placeholder="Title text" value="${esc(t.text)}" />` +
+      `<input class="ttext tsub" type="text" placeholder="Subtitle (optional)" value="${esc(t.subtitle)}" />` +
+      `<span class="ttime">${fmtSrc(t.in)} → ${fmtSrc(t.out)} · ${(t.out - t.in).toFixed(1)}s</span>` +
+      `</span>` +
+      `<span class="tfont" title="Title font size (this title)">` +
+      `<button class="small" data-act="fdec">A−</button>` +
+      `<span class="tscale">${Math.round((t.scale || 1) * 100)}%</span>` +
+      `<button class="small" data-act="finc">A+</button></span>` +
+      `<span class="rowbtns">` +
+      `<button class="small" data-act="center" title="Recenter (reset position)">⌖</button>` +
+      `<button class="small danger" data-act="del" title="Delete">✕</button></span>`;
+    const [txt, sub] = li.querySelectorAll('.ttext');
+    const scaleEl = li.querySelector('.tscale');
+    const bump = (d) => {
+      pushUndo();
+      t.scale = Math.round(clamp((t.scale || 1) + d, 0.4, 3) * 100) / 100;
+      scaleEl.textContent = `${Math.round(t.scale * 100)}%`;
+      invalidate(); scheduleSave();
+    };
+    const selQuiet = () => {
+      if (State.selTitle !== i) {
+        State.selTitle = i; State.selected = -1; State.selMarker = -1;
+        document.querySelectorAll('#titleList li').forEach(el =>
+          el.classList.toggle('sel', Number(el.dataset.i) === i));
+        invalidate(); updateStatus(); drawTl();
+      }
+    };
+    li.querySelector('[data-act=fdec]').onclick = (e) => { e.stopPropagation(); selQuiet(); bump(-0.1); };
+    li.querySelector('[data-act=finc]').onclick = (e) => { e.stopPropagation(); selQuiet(); bump(+0.1); };
+    li.onclick = () => selectTitle(i);
+    txt.onclick = sub.onclick = (e) => e.stopPropagation();
+    txt.addEventListener('focus', selQuiet);
+    sub.addEventListener('focus', selQuiet);
+    txt.addEventListener('input', () => { t.text = txt.value; invalidate(); scheduleSave(); drawTl(); });
+    sub.addEventListener('input', () => { t.subtitle = sub.value; scheduleSave(); });
+    li.querySelector('[data-act=center]').onclick = (e) => {
+      e.stopPropagation(); pushUndo();
+      t.x = TITLE_DEF_X; t.y = TITLE_DEF_Y; scheduleSave();
+    };
+    li.querySelector('[data-act=del]').onclick = (e) => { e.stopPropagation(); deleteTitle(i); };
+    ol.appendChild(li);
+  });
+}
+
+function bumpGlobalFont(d) {
+  pushUndo();
+  State.doc.title_scale = Math.round(clamp(titleScale() + d, 0.4, 3) * 100) / 100;
+  $('gFontScale').textContent = Math.round(titleScale() * 100) + '%';
+  invalidate(); scheduleSave();
+}
+
+function bindTitles() {
+  $('titleBtn').addEventListener('click', addTitle);
+  $('titleBtn2').addEventListener('click', addTitle);
+  $('gFontDec').addEventListener('click', () => bumpGlobalFont(-0.1));
+  $('gFontInc').addEventListener('click', () => bumpGlobalFont(+0.1));
+  bindTitleDrag();
+}
+
 /* ---------- playback ---------- */
 function seekSrc(idx, t) {
   State.ph.idx = clamp(idx, 0, segs().length - 1);
@@ -606,6 +860,7 @@ function tick() {
         invalidate();
       }
     }
+    updateTitleOverlay();
     drawTl();
   }
   requestAnimationFrame(tick);
@@ -629,7 +884,8 @@ function bindTransport() {
 function pushUndo() {
   State.undoStack.push(JSON.stringify({
     segments: segs(), cams: State.doc.cams, layout: State.doc.layout,
-    markers: State.doc.markers, selected: State.selected,
+    markers: State.doc.markers, titles: titles(),
+    title_scale: State.doc.title_scale, selected: State.selected,
   }));
   if (State.undoStack.length > 120) State.undoStack.shift();
   State._undoTag = null;
@@ -648,8 +904,10 @@ function undo() {
   State.doc.segments = st.segments;
   State.doc.cams = st.cams;
   State.doc.markers = st.markers || [];
+  State.doc.titles = st.titles || [];
+  if (st.title_scale != null) State.doc.title_scale = st.title_scale;
   State.selected = clamp(st.selected, -1, segs().length - 1);
-  State.selMarker = -1;
+  State.selMarker = -1; State.selTitle = -1;
   State._undoTag = null;
   invalidate();
   if (st.layout && st.layout.join() !== State.doc.layout.join()) {
@@ -659,6 +917,7 @@ function undo() {
   for (const c of State.clips) applyCam(c.id);
   seekOut(phOut());
   scheduleSave();
+  renderTitles();
   updateStatus();
   drawTl();
 }
@@ -803,14 +1062,18 @@ function loadDoc(doc) {
   pauseAll();
   State.doc = doc;
   State.doc.markers = doc.markers || [];
+  State.doc.titles = doc.titles || [];
+  if (State.doc.title_scale == null) State.doc.title_scale = 1;
   State.selected = -1;
   State.selMarker = -1;
+  State.selTitle = -1;
   State.undoStack = [];
   State._undoTag = null;
   applyLayoutOrder();            // panes/rows follow the doc's layout + cams
   fitView();
   seekOut(0);
   refreshProjectSelect();
+  renderTitles();
   invalidate();
   updateStatus();
   drawTl();
@@ -963,6 +1226,22 @@ function markerOccurrences() {
   return out;
 }
 
+/* Each title's concert [in,out] window mapped into OUTPUT-time bars, clipped
+   per segment (so a title can show as multiple bars across cuts/duplicates). */
+function titleOccurrences() {
+  const out = [];
+  let base = 0;
+  for (const s of segs()) {
+    const segLen = s.out - s.in;
+    titles().forEach((t, ti) => {
+      const a = Math.max(t.in, s.in), b = Math.min(t.out, s.out);
+      if (b - a > 0.001) out.push({ ti, T0: base + (a - s.in), T1: base + (b - s.in) });
+    });
+    base += segLen;
+  }
+  return out;
+}
+
 const SNAP_PX = 8;
 
 /* Snap an OUTPUT time to nearby markers / cut boundaries (scrubbing). */
@@ -1040,7 +1319,9 @@ function rebuildStatic() {
   const cAccent = css.getPropertyValue('--accent').trim() || '#4f8cff';
   const cMuted = css.getPropertyValue('--muted').trim() || '#8b93a7';
   const cWarn = css.getPropertyValue('--warn').trim() || '#f59e0b';
-  const y0 = 20, bh = H - y0 - 6;
+  const cTitle = css.getPropertyValue('--title').trim() || '#c084fc';
+  const laneY = 16, laneH = TITLE_LANE_H;                 // purple title lane
+  const y0 = laneY + laneH + 4, bh = H - y0 - 6;          // blocks below it
 
   // ruler
   ctx.font = '10px ui-monospace, Menlo, monospace';
@@ -1053,6 +1334,31 @@ function rebuildStatic() {
     ctx.beginPath(); ctx.moveTo(x, 12); ctx.lineTo(x, H); ctx.stroke();
     ctx.fillText(fmtOut(t).replace(/\.\d+$/, ''), x + 3, 10);
   }
+
+  // title lane (purple) — each title mapped from its concert window into
+  // OUTPUT time; a title spanning a cut/duplicate can appear as >1 bar
+  titleOccurrences().forEach((o) => {
+    const x0 = timeToX(o.T0), x1 = timeToX(o.T1);
+    if (x1 < 0 || x0 > W) return;
+    const sel = o.ti === State.selTitle;
+    ctx.fillStyle = sel ? 'rgba(192,132,252,0.42)' : 'rgba(192,132,252,0.22)';
+    ctx.fillRect(x0, laneY, x1 - x0, laneH);
+    ctx.strokeStyle = sel ? cTitle : '#9d6fd6';
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeRect(x0 + 0.5, laneY + 0.5, x1 - x0 - 1, laneH - 1);
+    const hw = 3;
+    ctx.fillStyle = sel ? cTitle : '#b48be0';
+    ctx.fillRect(x0, laneY, hw, laneH);
+    ctx.fillRect(x1 - hw, laneY, hw, laneH);
+    ctx.fillStyle = '#f3e9ff';
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0 + hw + 2, laneY, Math.max(0, x1 - x0 - 2 * hw - 4), laneH);
+    ctx.clip();
+    ctx.fillText(`T ${titles()[o.ti].text || 'Title'}`, x0 + hw + 4, laneY + 11);
+    ctx.restore();
+    ctx.lineWidth = 1;
+  });
 
   // segments (contiguous in output time)
   let base = 0;
@@ -1229,13 +1535,29 @@ function hitTest(x) {
 
 /* A marker flag under the cursor (top strip of the timeline). */
 function markerHit(x, y) {
-  if (y > 24) return null;
+  if (y > 14) return null;                      // only the flag row up top
   let best = null, bd = 9;
   for (const o of markerOccurrences()) {
     const dd = Math.abs(timeToX(o.T) - x);
     if (dd < bd) { bd = dd; best = o; }
   }
   return best;
+}
+
+/* Title bar (or its edge) under the cursor in the purple lane (y 16..31). */
+function titleLaneHit(x, y) {
+  if (y < 15 || y > 33) return null;
+  let bestEdge = null, bd = EDGE_PX;
+  for (const o of titleOccurrences()) {
+    const x0 = timeToX(o.T0), x1 = timeToX(o.T1);
+    if (Math.abs(x - x0) <= bd) bestEdge = { ti: o.ti, edge: 'in', o };
+    else if (Math.abs(x - x1) <= bd) bestEdge = { ti: o.ti, edge: 'out', o };
+  }
+  if (bestEdge) return bestEdge;
+  for (const o of titleOccurrences()) {
+    if (x > timeToX(o.T0) && x < timeToX(o.T1)) return { ti: o.ti, edge: null, o };
+  }
+  return null;
 }
 
 function tlDown(e) {
@@ -1245,9 +1567,31 @@ function tlDown(e) {
   if (mk) {
     // select the marker and park the playhead exactly on it (S cuts there)
     State.selMarker = mk.mi;
-    State.selected = -1;
+    State.selected = -1; State.selTitle = -1;
     seekOut(mk.T);
     invalidate();
+    updateStatus();
+    drawTl();
+    return;
+  }
+  const th = titleLaneHit(x, y);
+  if (th) {
+    State.selTitle = th.ti;
+    State.selected = -1; State.selMarker = -1;
+    const t = titles()[th.ti];
+    if (th.edge) {
+      pushUndo();
+      // edge drag retimes the title in CONCERT seconds. Map output-x -> concert
+      // via the segment under this occurrence (1:1 within a segment).
+      Tl.drag = { mode: 'titletrim', ti: th.ti, edge: th.edge, lastX: x,
+                  val: th.edge === 'in' ? t.in : t.out };
+    } else {
+      const ot = outputTimeOfConcert(t.in);
+      if (ot != null) seekOut(clamp(ot, 0, outDur()));
+      Tl.drag = { mode: 'titlemove', ti: th.ti, lastX: x };
+    }
+    invalidate();
+    renderTitles();
     updateStatus();
     drawTl();
     return;
@@ -1257,7 +1601,7 @@ function tlDown(e) {
   if (hit && hit.edge) {
     pushUndo();
     State.selected = hit.idx;
-    State.selMarker = -1;
+    State.selMarker = -1; State.selTitle = -1;
     const s = segs()[hit.idx];
     Tl.drag = { mode: 'trim', idx: hit.idx, edge: hit.edge, lastX: x,
                 val: hit.edge === 'in' ? s.in : s.out };
@@ -1266,12 +1610,12 @@ function tlDown(e) {
     // (reorder), or a DUPLICATE when ⌥/Alt is held at drag-start (drop a copy,
     // leave the original). Scrub-drags live on the ruler strip / playhead.
     State.selected = hit.idx;
-    State.selMarker = -1;
+    State.selMarker = -1; State.selTitle = -1;
     seekOut(snapOut(xToTime(x), e.shiftKey));
     Tl.drag = { mode: 'maybemove', idx: hit.idx, startX: x, x, dup: e.altKey };
   } else {
     State.selected = hit ? hit.idx : -1;
-    State.selMarker = -1;
+    State.selMarker = -1; State.selTitle = -1;
     Tl.drag = { mode: 'scrub' };
     seekOut(snapOut(xToTime(x), e.shiftKey));
   }
@@ -1352,8 +1696,11 @@ function tlMove(e) {
       const y = e.clientY - rect.top;
       const hit = hitTest(x);
       const mk = markerHit(x, y);
+      const th = titleLaneHit(x, y);
       Tl.cvs.style.cursor =
         mk ? 'pointer'
+        : th && th.edge ? 'col-resize'
+        : th ? 'grab'
         : hit && hit.edge ? 'col-resize'
         : hit && y > 20 ? 'grab'
         : 'crosshair';
@@ -1374,6 +1721,31 @@ function tlMove(e) {
   if (Tl.drag.mode === 'move') {
     Tl.drag.x = clamp(x, 0, Tl.w);
     return;               // ghost + insertion caret drawn by drawTl
+  }
+  if (Tl.drag.mode === 'titletrim') {
+    // retime a title edge in concert seconds; output Δ == concert Δ (1:1)
+    Tl.drag.val += (x - Tl.drag.lastX) / Tl.w * State.view.span;
+    Tl.drag.lastX = x;
+    const t = titles()[Tl.drag.ti];
+    const cand = Math.max(0, Math.min(State.duration, Tl.drag.val));
+    if (Tl.drag.edge === 'in') t.in = Math.min(cand, t.out - 0.1);
+    else t.out = Math.max(cand, t.in + 0.1);
+    t.in = Math.round(t.in * 1000) / 1000;
+    t.out = Math.round(t.out * 1000) / 1000;
+    invalidate(); scheduleSave(); renderTitles(); drawTl();
+    return;
+  }
+  if (Tl.drag.mode === 'titlemove') {
+    // slide the whole title window, preserving length
+    const dOut = (x - Tl.drag.lastX) / Tl.w * State.view.span;
+    Tl.drag.lastX = x;
+    const t = titles()[Tl.drag.ti];
+    const len = t.out - t.in;
+    let ni = clamp(t.in + dOut, 0, State.duration - len);
+    t.in = Math.round(ni * 1000) / 1000;
+    t.out = Math.round((ni + len) * 1000) / 1000;
+    invalidate(); scheduleSave(); renderTitles(); drawTl();
+    return;
   }
   // trim: accumulate the drag in unsnapped space (drag.val) and snap the
   // candidate each move — sticky near markers but still escapable
@@ -1437,6 +1809,8 @@ function bindKeys() {
         splitAtPlayhead(); break;
       case 'm': case 'M':
         addMarkerAtPlayhead(); break;
+      case 't': case 'T':
+        addTitle(); break;
       case '[':
         moveSelected(-1); break;
       case ']':
@@ -1444,10 +1818,11 @@ function bindKeys() {
       case 'Backspace': case 'Delete':
         e.preventDefault();
         if (State.selMarker >= 0) deleteSelectedMarker();
+        else if (State.selTitle >= 0) deleteTitle(State.selTitle);
         else deleteSelected();
         break;
       case 'Escape':
-        State.selected = -1; State.selMarker = -1;
+        State.selected = -1; State.selMarker = -1; State.selTitle = -1;
         invalidate(); updateStatus(); drawTl(); break;
       case '+': case '=':
         zoomView(1 / 1.5); drawTl(); break;

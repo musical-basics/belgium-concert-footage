@@ -13,6 +13,11 @@
 /* Save button: highlight amber while there are unsaved edits. */
 #saveBtn.dirty { border-color: var(--warn); color: var(--warn); font-weight: 600; }
 
+/* Title overlay covers the whole portrait stage (not a single pane). */
+#stage .title-overlay { inset: 0; left: 0; top: 0; width: 100%; height: 100%; z-index: 5; }
+.tfont-global { color: var(--muted); display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+#titleList { margin-top: 6px; }
+
 #reelsMain { flex: 1; display: flex; flex-direction: row; overflow: hidden; padding: 10px 14px; gap: 14px; }
 
 /* ---- portrait preview stage ---- */
