@@ -48,6 +48,7 @@ const State = {
   redoStack: [],                            // [{snap, label}] — states to redo TO
   saveTimer: null,
   dirty: false,                             // unsaved edits pending
+  captioning: false,                        // Add-captions job in flight
   exportTimer: null,
   color: null,                              // shared camera grades (loadGrades)
   projects: [],                             // reel project metas {id,name,...}
@@ -216,6 +217,8 @@ function updateStatus() {
     `${State.clips.map(c => c.label).join(' / ')} · concert ${fmtSrc(State.duration)}`;
   $('reelMeta').textContent = `${fmtOut(outDur())} · ${n} segment${n === 1 ? '' : 's'}`;
   $('deleteBtn').disabled = !(State.selected >= 0 && n > 1);
+  const capBtn = $('captionBtn');
+  if (capBtn && !State.captioning) capBtn.disabled = !(State.selected >= 0);
   const mk = State.doc.markers[State.selMarker];
   $('deleteMarkerBtn').hidden = !mk;
   const sel = segs()[State.selected];
@@ -773,6 +776,75 @@ function addTitle() {
   if (inp) { inp.focus(); inp.select(); }
 }
 
+/* Auto-caption the SELECTED segment: transcribe just that concert-time slice
+   (server /api/captions) and drop the returned lines in as titles. Caption
+   lines come back in CONCERT time within the segment; map each to reel time via
+   the segment's reel base + offset. Placed as ONE undo step. Words-per-line is
+   asked each time (remembered per-device as the default). */
+const CAP_WPL_KEY = 'reels.captionWPL';
+async function addCaptions() {
+  if (State.captioning) return;
+  const i = State.selected;
+  const s = segs()[i];
+  if (!s) { flashSave('⚠ select a segment first'); return; }
+  let prev = 3;
+  try { prev = clamp(parseInt(localStorage.getItem(CAP_WPL_KEY), 10) || 3, 1, 12); }
+  catch (e) { /* ignore */ }
+  const raw = prompt(
+    `Auto-caption segment ${i + 1} (${(s.out - s.in).toFixed(1)}s of audio).\n` +
+    'Words per caption line:', String(prev));
+  if (raw === null) return;                     // cancelled
+  const wpl = clamp(parseInt(raw, 10) || prev, 1, 12);
+  try { localStorage.setItem(CAP_WPL_KEY, String(wpl)); } catch (e) { /* ignore */ }
+
+  State.captioning = true;
+  const btn = $('captionBtn');
+  btn.disabled = true; btn.textContent = '🗣 transcribing…';
+  flashSave('transcribing the selected section…');
+  try {
+    const r = await api('/api/captions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ in: s.in, out: s.out, words_per_line: wpl }),
+    }).then(r => r.json());
+    if (!r.ok) throw new Error(r.error || 'caption failed');
+    const lines = r.captions || [];
+    if (!lines.length) { flashSave('no speech found in this section'); return; }
+    // The selected segment may have shifted if edited during the request; re-find
+    // it by identity and bail if it's gone.
+    const si = segs().indexOf(s);
+    if (si < 0) { flashSave('⚠ segment changed — captions discarded'); return; }
+    pushUndo(`add ${lines.length} captions`);
+    const base = outBase(si);
+    const def = titleStyleDefault();
+    const dur = outDur();
+    for (const ln of lines) {
+      // clamp the concert times into the segment, then offset into reel time
+      const cin = clamp(ln.start, s.in, s.out), cout = clamp(ln.end, s.in, s.out);
+      let tin = base + (cin - s.in);
+      let tout = base + (cout - s.in);
+      tin = clamp(tin, 0, Math.max(0, dur - 0.1));
+      tout = clamp(Math.max(tout, tin + 0.3), tin + 0.3, dur);
+      titles().push({ text: ln.text, subtitle: '',
+        in: +tin.toFixed(3), out: +tout.toFixed(3),
+        x: def.x, y: def.y, scale: def.scale, wrap: def.wrap });
+    }
+    titles().sort((a, b) => a.in - b.in);
+    invalidate();
+    scheduleSave();
+    renderTitles();
+    updateStatus();
+    drawTl();
+    flashSave(`✓ added ${lines.length} caption${lines.length === 1 ? '' : 's'}`);
+  } catch (e) {
+    flashSave('⚠ captions failed — ' + e.message);
+  } finally {
+    State.captioning = false;
+    btn.textContent = '🗣 Add captions';
+    updateStatus();                             // re-enables per selection
+  }
+}
+
 function selectTitle(idx, opts = {}) {
   const { seek = true } = opts;
   State.selTitle = idx;
@@ -1069,6 +1141,7 @@ function bindTransport() {
     b.addEventListener('click', () => seekOut(phOut() + Number(b.dataset.jump))));
   $('splitBtn').addEventListener('click', splitAtPlayhead);
   $('markerBtn').addEventListener('click', addMarkerAtPlayhead);
+  $('captionBtn').addEventListener('click', addCaptions);
   $('deleteBtn').addEventListener('click', deleteSelected);
   $('deleteMarkerBtn').addEventListener('click', deleteSelectedMarker);
   $('undoBtn').addEventListener('click', undo);

@@ -12,15 +12,18 @@ Local editor server for the Belgium Concert Highlights project.
 Run:  python3 editor/server.py   then open http://localhost:8000
 No third-party dependencies.
 """
+import glob
 import hmac
 import html
 import json
 import uuid
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -40,6 +43,7 @@ META_PATH = os.path.join(ROOT, "cache", "clips_meta.json")
 WAVE_BIN = os.path.join(ROOT, "cache", "waveform.u8")
 WAVE_META = os.path.join(ROOT, "cache", "waveform.json")
 TRANSCRIPT_PATH = os.path.join(ROOT, "cache", "transcript.json")
+WHISPER_BIN = os.path.expanduser("~/.local/bin/whisper")  # same CLI transcribe.py uses
 SYNC_JSON = os.path.join(EDITOR_DIR, "sync.json")   # 5D 2 live-camera coverage map
 REELS_JSON = os.path.join(ROOT, "reels.json")       # reels interface cut list + framing
 
@@ -1591,6 +1595,142 @@ def _clean_title(t):
     return clean
 
 
+# ---- on-demand captions (reels "Add captions") -----------------------
+# Transcribe just a SELECTED concert-time slice of the audio bed (Back Camera)
+# and return caption lines grouped to a requested words-per-line. This is a
+# synchronous, in-request job on purpose: a reel section is short (seconds to a
+# couple of minutes), so whisper finishes fast and the client gets titles back
+# in one shot — no polling, no background job registry. Unlike tools/transcribe
+# .py (the whole-show batch pass) this never touches cache/transcript.json.
+
+# Music-heavy filler whisper hallucinates over piano passages — mirror the
+# batch transcriber's filter so caption lines are real speech only.
+_CAP_FILLERS = {
+    "you", "thank you", "thank you.", "thanks for watching",
+    "thank you for watching", "thanks for watching.", "bye", "bye.",
+    "so", "so.", "okay", "okay.", "ok", "uh", "um", "mm", "mm-hmm",
+    "you.", "the", ".", "..", "...",
+}
+
+
+def _cap_is_speech(seg):
+    text = (seg.get("text") or "").strip()
+    norm = text.lower().strip().strip('"“”')
+    if not norm:
+        return False
+    if seg.get("no_speech_prob", 0) > 0.6:
+        return False
+    if seg.get("avg_logprob", 0) < -1.2:
+        return False
+    if not re.sub(r"[^\w]", "", norm):
+        return False
+    if re.fullmatch(r"[\[\(\"].*[\]\)\"]", text.strip()):
+        return False
+    if norm in _CAP_FILLERS:
+        return False
+    return True
+
+
+def _cap_words(data, lo, hi):
+    """Flatten whisper word timestamps from the kept (speech) segments into a
+    single list of {t0, t1, w}, all clamped to the [lo,hi] slice length. Falls
+    back to segment-level timing when a segment lacks word stamps."""
+    words = []
+    for seg in data.get("segments", []):
+        if not _cap_is_speech(seg):
+            continue
+        ws = seg.get("words") or []
+        if ws:
+            for w in ws:
+                tok = (w.get("word") or "").strip()
+                if not tok:
+                    continue
+                t0 = max(lo, min(hi, float(w.get("start", seg["start"]))))
+                t1 = max(lo, min(hi, float(w.get("end", seg["end"]))))
+                words.append({"t0": t0, "t1": max(t1, t0 + 0.05), "w": tok})
+        else:
+            # no per-word stamps — spread the segment's words evenly across it
+            toks = (seg.get("text") or "").split()
+            if not toks:
+                continue
+            s0 = max(lo, min(hi, float(seg["start"])))
+            s1 = max(lo, min(hi, float(seg["end"])))
+            step = (s1 - s0) / len(toks) if len(toks) else 0
+            for k, tok in enumerate(toks):
+                a = s0 + k * step
+                words.append({"t0": a, "t1": a + step, "w": tok})
+    words.sort(key=lambda x: x["t0"])
+    return words
+
+
+def generate_captions(start, end, words_per_line):
+    """Transcribe the audio bed between concert times [start,end] and return
+    caption lines: [{"start","end","text"}] in CONCERT time. Each line holds up
+    to `words_per_line` words. Raises RuntimeError with a readable message on
+    failure."""
+    src = None
+    for c in CLIPS:
+        if c.get("is_audio"):
+            src = os.path.join(PROXY_DIR, c["proxy"])
+            break
+    if not src:
+        src = os.path.join(PROXY_DIR, CLIPS[0]["proxy"])
+    if not os.path.isfile(src):
+        raise RuntimeError(f"audio source missing: {os.path.basename(src)}")
+    if not os.path.isfile(WHISPER_BIN):
+        raise RuntimeError("whisper CLI not found — install it to add captions")
+
+    lo, hi = round(min(start, end), 3), round(max(start, end), 3)
+    if hi - lo < 0.2:
+        raise RuntimeError("section too short to caption")
+    if hi - lo > 20 * 60:
+        raise RuntimeError("section too long — select a shorter clip")
+
+    wpl = max(1, min(12, int(words_per_line or 3)))
+    work = tempfile.mkdtemp(prefix="reelcap_")
+    try:
+        wav = os.path.join(work, "slice.wav")
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-ss", str(lo), "-to", str(hi),
+             "-i", src, "-ac", "1", "-ar", "16000", "-vn", wav],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [WHISPER_BIN, wav, "--model", "base.en", "--device", "cpu",
+             "--task", "transcribe", "--language", "en", "--fp16", "False",
+             "--condition_on_previous_text", "False", "--word_timestamps", "True",
+             "--output_format", "json", "--output_dir", work, "--verbose", "False"],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        js = glob.glob(os.path.join(work, "*.json"))
+        if not js:
+            raise RuntimeError("transcription produced no output")
+        with open(js[0]) as f:
+            data = json.load(f)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"transcription failed (exit {e.returncode})")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    # whisper timings are relative to the slice (starts at 0) — offset back to
+    # concert time by adding lo.
+    words = _cap_words(data, 0, hi - lo)
+    lines = []
+    for i in range(0, len(words), wpl):
+        grp = words[i:i + wpl]
+        if not grp:
+            continue
+        text = " ".join(w["w"] for w in grp).strip()
+        if not text:
+            continue
+        lines.append({
+            "start": round(lo + grp[0]["t0"], 3),
+            "end": round(lo + grp[-1]["t1"], 3),
+            "text": text,
+        })
+    return lines
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1929,6 +2069,23 @@ class Handler(BaseHTTPRequestHandler):
             if st is None:
                 return self._send_json({"ok": False, "error": "no such project"}, 404)
             return self._send_json({"ok": True, **st})
+        if path == "/api/captions":
+            # Transcribe a SELECTED concert-time slice of the audio bed and
+            # return caption lines (concert time), N words per line. Synchronous:
+            # a reel section is short, so whisper finishes within the request.
+            try:
+                body = self._read_json()
+                start = float(body["in"]); end = float(body["out"])
+                wpl = int(body.get("words_per_line") or 3)
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            try:
+                lines = generate_captions(start, end, wpl)
+            except RuntimeError as e:
+                return self._send_json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+            return self._send_json({"ok": True, "captions": lines})
         if path == "/api/titles":
             # Additive title API for the external agent: append one title (a bare
             # object) or many ({"titles":[...]}), without touching anything else.
