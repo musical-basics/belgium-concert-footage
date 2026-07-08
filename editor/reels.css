@@ -13,6 +13,26 @@
 /* Save button: highlight amber while there are unsaved edits. */
 #saveBtn.dirty { border-color: var(--warn); color: var(--warn); font-weight: 600; }
 
+/* Export split-button + dropdown */
+.export-group { position: relative; display: inline-flex; }
+.export-group #exportBtn { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.export-caret {
+  border-top-left-radius: 0; border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(255,255,255,0.3); padding: 6px 8px;
+}
+.export-menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 60;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5); padding: 5px; min-width: 190px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.export-menu[hidden] { display: none; }
+.export-menu button {
+  text-align: left; background: none; border: 0; border-radius: 6px;
+  padding: 7px 10px; color: var(--text); font-size: 12px;
+}
+.export-menu button:hover { background: var(--panel2); border: 0; }
+
 /* edit-history popover */
 #historyPanel {
   position: fixed; top: 46px; right: 14px; z-index: 50;

@@ -195,6 +195,9 @@ def main():
     ap.add_argument("--markers", default=os.path.join(ROOT, "markers.json"))
     ap.add_argument("--project", default=None,
                     help="reel project id (default: the store's active project)")
+    ap.add_argument("--out-name", default=None,
+                    help="output basename without extension (default: reel_<slug>); "
+                         "used for 'export new' to a distinct file")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--encoder", default="auto")
     args = ap.parse_args()
@@ -213,7 +216,7 @@ def main():
     else:                                       # legacy single-doc file
         doc = raw
     pname = str(doc.get("name") or "3stack")
-    name = "reel_" + slug(pname)
+    name = slug(args.out_name) if args.out_name else "reel_" + slug(pname)
     if os.path.isfile(args.markers):
         with open(args.markers) as f:
             R.apply_camera_grades(json.load(f).get("camera_grades"))

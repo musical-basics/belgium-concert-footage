@@ -995,9 +995,10 @@ def _style_worker(style):
             info["started"] = time.time()
             info["phase"] = "preparing"
             info["progress"] = 0
+            cmd = [sys.executable, "-u", spec["script"]]
+            cmd += list(info.get("args") or [])   # e.g. ["--out-name", "reel_x_2"]
             proc = subprocess.Popen(
-                [sys.executable, "-u", spec["script"]],
-                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
             last = ""
             for line in proc.stdout:
@@ -1031,8 +1032,10 @@ def _style_worker(style):
         info["ended"] = time.time()
 
 
-def start_style(style):
-    """Kick a background render of a whole-video style. Returns (started, err)."""
+def start_style(style, extra_args=None):
+    """Kick a background render of a whole-video style. `extra_args` are passed
+    straight to the style script (e.g. ["--out-name", "reel_x_2"]). Returns
+    (started, err)."""
     spec = STYLES.get(style)
     if not spec or spec.get("per_performance"):
         return False, "unknown style"
@@ -1042,7 +1045,8 @@ def start_style(style):
             return False, None
         _STYLE_JOBS[style] = {"status": "queued", "requested": time.time(),
                               "progress": 0, "phase": "queued",
-                              "file": None, "error": None, "line": ""}
+                              "file": None, "error": None, "line": "",
+                              "args": list(extra_args or [])}
     threading.Thread(target=_style_worker, args=(style,), daemon=True).start()
     return True, None
 
@@ -1387,6 +1391,27 @@ def output_file_map():
         if os.path.isfile(os.path.join(OUT_DIR, name)):
             files[i + 1] = name
     return files
+
+
+def reel_outputs():
+    """List existing reel exports (output/reel_*.mp4), newest first, with size
+    and mtime — for the reels editor's 'exports' list, Show-in-Finder, and to
+    compute the next 'export new' filename."""
+    out = []
+    try:
+        for fn in os.listdir(OUT_DIR):
+            if not (fn.startswith("reel_") and fn.endswith(".mp4")):
+                continue
+            p = os.path.join(OUT_DIR, fn)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            out.append({"file": fn, "size": st.st_size, "mtime": st.st_mtime})
+    except OSError:
+        pass
+    out.sort(key=lambda e: e["mtime"], reverse=True)
+    return out
 
 
 def render_plans():
@@ -1755,6 +1780,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/styles":
             # Style registry + live job state + outputs already on disk.
             return self._send_json({"styles": styles_status()})
+        if path == "/api/reel-outputs":
+            # Existing reel_*.mp4 exports (for the reels editor's export list).
+            return self._send_json({"outputs": reel_outputs()})
         if path == "/api/plans":
             return self._send_json({"plans": render_plans()})
         if path == "/api/thumbnails":
@@ -2011,7 +2039,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": False, "error": str(e)}, 400)
             style = (body.get("style") or "").strip()
             if style and style != "highlights":
-                started, err = start_style(style)
+                # optional out_name for "export new" (a distinct output file);
+                # sanitize to a safe basename so it can't escape OUT_DIR
+                extra = []
+                raw_name = str(body.get("out_name") or "").strip()
+                if raw_name:
+                    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", raw_name).strip("-")[:80]
+                    if safe:
+                        extra = ["--out-name", safe]
+                started, err = start_style(style, extra)
                 if err:
                     return self._send_json({"ok": False, "error": err}, 400)
                 return self._send_json({"ok": True, "style": style, "started": started})
@@ -2033,18 +2069,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": False, "error": err}, 400)
             return self._send_json({"ok": True, "index": index, "started": started})
         if path == "/api/open":
-            # Open a finished render in the default player. Restricted to OUT_DIR.
+            # Open a finished render in the default player, or reveal it in
+            # Finder when {"reveal": true}. Restricted to OUT_DIR.
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length else b"{}"
             try:
-                fname = os.path.basename(json.loads(raw.decode("utf-8")).get("file", ""))
+                body = json.loads(raw.decode("utf-8"))
+                fname = os.path.basename(body.get("file", ""))
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 400)
             target = os.path.join(OUT_DIR, fname)
             if not fname or not os.path.isfile(target):
                 return self._send_json({"ok": False, "error": "no such file"}, 404)
             try:
-                subprocess.Popen(["open", target])
+                cmd = ["open", "-R", target] if body.get("reveal") else ["open", target]
+                subprocess.Popen(cmd)
             except Exception as e:
                 return self._send_json({"ok": False, "error": str(e)}, 500)
             return self._send_json({"ok": True})

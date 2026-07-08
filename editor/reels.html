@@ -26,8 +26,16 @@
   <button id="redoBtn" title="Redo (⇧⌘Z)" disabled>↷ Redo</button>
   <button id="historyBtn" title="Show edit history">🕘 History</button>
   <button id="saveBtn" title="Save this reel now (⌘S) — edits also autosave a moment after each change">💾 Save</button>
-  <button id="exportBtn" class="primary" title="Render the reel (1080×1920, all segments, mastered audio bed)">🎬 Export reel</button>
+  <div class="export-group">
+    <button id="exportBtn" class="primary" title="Render the reel (1080×1920, all segments, mastered audio bed)">🎬 Export reel</button>
+    <button id="exportMenuBtn" class="primary export-caret" title="Export options">▾</button>
+    <div id="exportMenu" class="export-menu" hidden>
+      <button id="exportReplace" title="Overwrite this reel's existing export file">↻ Export (replace)</button>
+      <button id="exportNew" title="Export to a new numbered file, keeping the previous one">＋ Export as new</button>
+    </div>
+  </div>
   <button id="openBtn" hidden title="Open the finished reel">▶ Open</button>
+  <button id="revealBtn" hidden title="Show the finished reel in Finder">📁 Finder</button>
 </header>
 
 <div id="historyPanel" hidden>

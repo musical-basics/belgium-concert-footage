@@ -2176,32 +2176,70 @@ function bindKeys() {
 
 /* ---------- export ---------- */
 function bindExport() {
-  $('exportBtn').addEventListener('click', async () => {
-    try {
-      // flush the latest cut AND make this project the active one — the
-      // render script exports the store's active project
-      await doSave();
-      const r = await api('/api/export', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ style: 'reels' }),
-      }).then(r => r.json());
-      if (!r.ok) throw new Error(r.error || 'export failed');
-      pollExport();
-    } catch (e) {
-      flashSave('⚠ export failed — ' + e.message);
-    }
+  // main button = export replacing this reel's file; caret opens the menu
+  $('exportBtn').addEventListener('click', () => doExport('replace'));
+  const menu = $('exportMenu');
+  $('exportMenuBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    menu.hidden = !menu.hidden;
   });
-  $('openBtn').addEventListener('click', () => {
-    const file = $('openBtn').dataset.file;
-    if (!file) return;
-    api('/api/open', {
+  document.addEventListener('click', () => { menu.hidden = true; });
+  $('exportReplace').addEventListener('click', () => { menu.hidden = true; doExport('replace'); });
+  $('exportNew').addEventListener('click', () => { menu.hidden = true; doExport('new'); });
+  $('openBtn').addEventListener('click', () => revealOrOpen(false));
+  $('revealBtn').addEventListener('click', () => revealOrOpen(true));
+  refreshExport();  // show ▶ Open if this reel finished rendering earlier
+}
+
+/* Client mirror of the server's slugify, so we can predict output filenames. */
+function slugify(s) {
+  return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'reel';
+}
+function reelBaseName() {
+  const p = State.projects.find(x => x.id === State.projectId);
+  return 'reel_' + slugify(p ? p.name : '3stack');
+}
+
+/* Next free "export as new" name: reel_<slug>_2, _3, … given existing files. */
+async function nextReelName() {
+  const base = reelBaseName();
+  let existing = [];
+  try {
+    existing = (await api('/api/reel-outputs').then(r => r.json())).outputs || [];
+  } catch (e) { /* fall through */ }
+  const names = new Set(existing.map(o => o.file.replace(/\.mp4$/, '')));
+  if (!names.has(base)) return base;          // base slot free (unusual after first export)
+  let n = 2;
+  while (names.has(`${base}_${n}`)) n++;
+  return `${base}_${n}`;
+}
+
+async function doExport(mode) {
+  try {
+    await doSave();                            // flush + make this project active
+    const body = { style: 'reels' };
+    if (mode === 'new') body.out_name = await nextReelName();
+    const r = await api('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file }),
-    });
+      body: JSON.stringify(body),
+    }).then(r => r.json());
+    if (!r.ok) throw new Error(r.error || 'export failed');
+    flashSave(mode === 'new' ? `rendering ${body.out_name}.mp4…` : 'rendering…');
+    pollExport();
+  } catch (e) {
+    flashSave('⚠ export failed — ' + e.message);
+  }
+}
+
+function revealOrOpen(reveal) {
+  const file = $('openBtn').dataset.file;
+  if (!file) return;
+  api('/api/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file, reveal }),
   });
-  refreshExport();  // show ▶ Open if this reel finished rendering earlier
 }
 
 async function refreshExport() {
@@ -2221,10 +2259,10 @@ async function refreshExport() {
     btn.disabled = false;
     btn.textContent = '🎬 Export reel';
     if (job && job.status === 'error') flashSave('⚠ render failed — ' + (job.error || ''));
-    // output filename is per-project (reel_<name>.mp4) — take it from the
-    // finished job's "✓" line rather than a fixed name
+    // output filename comes from the finished job's "✓" line
     const file = (job && job.status === 'done' && job.file) || null;
     $('openBtn').hidden = !file;
+    $('revealBtn').hidden = !file;
     if (file) $('openBtn').dataset.file = file;
     return false;
   } catch (e) { return false; }
