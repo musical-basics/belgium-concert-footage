@@ -169,8 +169,11 @@ def render_title_png(title, out_path, W, H, gscale):
     main_font = ImageFont.truetype(TEXT_FONT, fs_main)
     sub_font = ImageFont.truetype(TEXT_FONT, fs_sub)
 
-    mains = _wrap(title.get("text") or "", max(6, round(40 / s)), wrap)
-    subs = _wrap(title.get("subtitle") or "", max(8, round(56 / s)), wrap)
+    # char caps tuned for the PORTRAIT 1080-wide frame (Arial-Bold at the
+    # default size) — must match editor/reels.js TITLE_*_MAX_CHARS so the
+    # wrap preview equals the export.
+    mains = _wrap(title.get("text") or "", max(6, round(17 / s)), wrap)
+    subs = _wrap(title.get("subtitle") or "", max(8, round(29 / s)), wrap)
     gap = fs_main * 0.5 if (mains and subs) else 0
     block_h = len(mains) * lh_main + gap + len(subs) * lh_sub
     y0 = cy * H - block_h / 2

@@ -19,9 +19,13 @@ const OUT_W = 1080, OUT_H = 1920;
 const SRC_W = 1920, SRC_H = 1080;          // all three stationary cameras
 const MIN_SEG = 0.1;                        // shortest segment (s)
 const EDGE_PX = 6;                          // trim-handle hit zone
-// Titles (same model/constants as the main editor).
+// Titles (same model as the main editor, but the char caps below are tuned for
+// the PORTRAIT 1080-wide frame — a line this many chars of Arial-Bold at the
+// default font size fills the frame width. The landscape editor uses a higher
+// cap because its frame is 1920 wide. Keep these in lockstep with the renderer
+// (render/title_image.py + render/style_reels.py) so wrap preview == export.
 const TITLE_DEF_X = 0.5, TITLE_DEF_Y = 0.80;
-const TITLE_MAIN_MAX_CHARS = 40, TITLE_SUB_MAX_CHARS = 56;
+const TITLE_MAIN_MAX_CHARS = 17, TITLE_SUB_MAX_CHARS = 29;
 const TITLE_DEFAULT_LEN = 4;                // seconds for a fresh title
 const TITLE_SNAP_TOL = 0.015;               // center-lock pull radius (Shift disables)
 const TITLE_LANE_Y = 0, TITLE_LANE_H = 15;  // purple lane at the very top of the timeline
@@ -40,7 +44,8 @@ const State = {
   selected: -1,
   selRange: null,                           // [lo,hi] contiguous multi-clip span (Shift+click), else null
   selMarker: -1,
-  selTitle: -1,                             // selected title index (-1 none)
+  selTitle: -1,                             // primary selected title index (-1 none)
+  selTitleSet: new Set(),                   // multi-selected title OBJECTS (⌘/⇧-click); survives re-sort
   previewTitle: null,                       // title under the playhead (drag target)
   snap: { x: false, y: false },             // center-lock guide state
   view: { start: 0, span: 60 },             // timeline window (output time)
@@ -788,6 +793,7 @@ function addTitle() {
   titles().push(title);
   titles().sort((a, b) => a.in - b.in);
   State.selTitle = titles().indexOf(title);
+  State.selTitleSet = new Set();
   State.selected = -1; State.selMarker = -1;
   invalidate();
   scheduleSave();
@@ -895,6 +901,7 @@ async function addCaptions() {
 function selectTitle(idx, opts = {}) {
   const { seek = true } = opts;
   State.selTitle = idx;
+  State.selTitleSet = new Set();              // plain select clears any multi-set
   State.selected = -1; State.selMarker = -1;
   const t = titles()[idx];
   if (seek && t) seekOut(clamp(t.in, 0, outDur()));   // in/out are reel time
@@ -904,10 +911,72 @@ function selectTitle(idx, opts = {}) {
   drawTl();
 }
 
+/* Multi-selection tracks title OBJECTS (not indices) so it survives the
+   re-sort that follows most title edits. The set + the primary selTitle
+   together give the highlighted rows. */
+function selectedTitles() {
+  // return the objects currently in the multi-set that still exist, plus the
+  // primary — de-duplicated, preserving list order.
+  const list = titles();
+  const chosen = new Set(State.selTitleSet);
+  const prim = list[State.selTitle];
+  if (prim) chosen.add(prim);
+  return list.filter((t) => chosen.has(t));
+}
+function isTitleSelected(i) {
+  const t = titles()[i];
+  return i === State.selTitle || (t && State.selTitleSet.has(t));
+}
+function clearTitleSel() { State.selTitle = -1; State.selTitleSet = new Set(); }
+
+/* ⌘/Ctrl-click toggles one title in the multi-set; ⇧-click selects the
+   contiguous range from the primary to the clicked one. Both keep the clicked
+   title as the new primary (drives the preview + single-title ops). */
+function toggleTitle(idx) {
+  const t = titles()[idx];
+  if (!t) return;
+  // seed the set with the current primary so the first ⌘-click grows from it
+  if (!State.selTitleSet.size && State.selTitle >= 0 && titles()[State.selTitle])
+    State.selTitleSet.add(titles()[State.selTitle]);
+  if (State.selTitleSet.has(t)) State.selTitleSet.delete(t);
+  else State.selTitleSet.add(t);
+  State.selTitle = idx;
+  State.selected = -1; State.selMarker = -1;
+  invalidate(); renderTitles(); updateStatus(); drawTl();
+}
+function rangeSelectTitle(idx) {
+  const anchor = State.selTitle >= 0 ? State.selTitle : idx;
+  const lo = Math.min(anchor, idx), hi = Math.max(anchor, idx);
+  State.selTitleSet = new Set(titles().slice(lo, hi + 1));
+  State.selTitle = idx;
+  State.selected = -1; State.selMarker = -1;
+  invalidate(); renderTitles(); updateStatus(); drawTl();
+}
+
+/* Apply `fn(title)` to every selected title as ONE undo step, then re-sort /
+   refresh. Used by the batch toolbar (font, wrap, recenter, delete). */
+function batchTitles(label, fn) {
+  const sel = selectedTitles();
+  if (!sel.length) return;
+  pushUndo(label);
+  for (const t of sel) fn(t);
+  titles().sort((a, b) => a.in - b.in);
+  invalidate(); scheduleSave(); renderTitles(); updateStatus(); drawTl();
+}
+function deleteSelectedTitles() {
+  const sel = new Set(selectedTitles());
+  if (!sel.size) return;
+  pushUndo(sel.size === 1 ? 'delete title' : `delete ${sel.size} titles`);
+  State.doc.titles = titles().filter((t) => !sel.has(t));
+  clearTitleSel();
+  invalidate(); scheduleSave(); renderTitles(); updateStatus(); drawTl();
+}
+
 function deleteTitle(idx) {
   if (idx < 0 || idx >= titles().length) return;
   pushUndo('delete title');
-  titles().splice(idx, 1);
+  const [removed] = titles().splice(idx, 1);
+  if (removed) State.selTitleSet.delete(removed);
   if (State.selTitle === idx) State.selTitle = -1;
   else if (State.selTitle > idx) State.selTitle--;
   invalidate();
@@ -922,6 +991,7 @@ function renderTitles() {
   ol.innerHTML = '';
   $('titleCount').textContent = titles().length;
   $('gFontScale').textContent = Math.round(titleScale() * 100) + '%';
+  renderBatchBar();
   if (!titles().length) {
     ol.innerHTML = '<li class="title-empty">No titles yet — click “＋ Create title”.</li>';
     return;
@@ -930,7 +1000,7 @@ function renderTitles() {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   titles().forEach((t, i) => {
     const li = document.createElement('li');
-    li.className = i === State.selTitle ? 'sel' : '';
+    li.className = isTitleSelected(i) ? 'sel' : '';
     li.dataset.i = i;
     const wrapOn = t.wrap !== false;
     li.innerHTML =
@@ -964,16 +1034,21 @@ function renderTitles() {
       invalidate(); scheduleSave();
     };
     const selQuiet = () => {
-      if (State.selTitle !== i) {
-        State.selTitle = i; State.selected = -1; State.selMarker = -1;
-        document.querySelectorAll('#titleList li').forEach(el =>
-          el.classList.toggle('sel', Number(el.dataset.i) === i));
+      if (State.selTitle !== i || State.selTitleSet.size) {
+        State.selTitle = i; State.selTitleSet = new Set();
+        State.selected = -1; State.selMarker = -1;
+        renderTitles();
         invalidate(); updateStatus(); drawTl();
       }
     };
     li.querySelector('[data-act=fdec]').onclick = (e) => { e.stopPropagation(); selQuiet(); bump(-0.1); };
     li.querySelector('[data-act=finc]').onclick = (e) => { e.stopPropagation(); selQuiet(); bump(+0.1); };
-    li.onclick = () => selectTitle(i);
+    // plain click selects; ⌘/Ctrl toggles into the multi-set; ⇧ range-selects
+    li.onclick = (e) => {
+      if (e.metaKey || e.ctrlKey) toggleTitle(i);
+      else if (e.shiftKey) rangeSelectTitle(i);
+      else selectTitle(i);
+    };
     txt.onclick = sub.onclick = (e) => e.stopPropagation();
     txt.addEventListener('focus', selQuiet);
     sub.addEventListener('focus', selQuiet);
@@ -993,9 +1068,49 @@ function renderTitles() {
       e.stopPropagation(); pushUndo('recenter title');
       t.x = TITLE_DEF_X; t.y = TITLE_DEF_Y; scheduleSave();
     };
-    li.querySelector('[data-act=del]').onclick = (e) => { e.stopPropagation(); deleteTitle(i); };
+    li.querySelector('[data-act=del]').onclick = (e) => {
+      e.stopPropagation();
+      // if this row is part of a multi-selection, delete the whole set
+      if (State.selTitleSet.size && isTitleSelected(i)) deleteSelectedTitles();
+      else deleteTitle(i);
+    };
     ol.appendChild(li);
   });
+}
+
+/* Batch toolbar: appears above the list when 2+ titles are multi-selected,
+   applying an edit to all of them in one undo step. */
+function renderBatchBar() {
+  const bar = $('titleBatch');
+  if (!bar) return;
+  const sel = selectedTitles();
+  const n = sel.length;
+  if (n < 2) { bar.hidden = true; bar.innerHTML = ''; return; }
+  bar.hidden = false;
+  bar.innerHTML =
+    `<span class="tb-count">${n} selected</span>` +
+    `<span class="tb-group" title="Font size for all selected">` +
+    `<button class="small" data-b="fdec">A−</button>` +
+    `<button class="small" data-b="finc">A+</button></span>` +
+    `<span class="tb-group" title="Wrap for all selected">` +
+    `<button class="small" data-b="wrapon">wrap on</button>` +
+    `<button class="small" data-b="wrapoff">wrap off</button></span>` +
+    `<button class="small" data-b="center" title="Recenter all selected">⌖ center</button>` +
+    `<div class="spacer"></div>` +
+    `<button class="small" data-b="clear" title="Clear selection">✕ clear</button>` +
+    `<button class="small danger" data-b="del" title="Delete all selected">🗑 delete ${n}</button>`;
+  const on = (b, fn) => { bar.querySelector(`[data-b=${b}]`).onclick = fn; };
+  on('fdec', () => batchTitles('title font size', (t) =>
+    t.scale = Math.round(clamp((t.scale || 1) - 0.1, 0.4, 3) * 100) / 100));
+  on('finc', () => batchTitles('title font size', (t) =>
+    t.scale = Math.round(clamp((t.scale || 1) + 0.1, 0.4, 3) * 100) / 100));
+  on('wrapon', () => batchTitles('title wrap on', (t) => t.wrap = true));
+  on('wrapoff', () => batchTitles('title wrap off', (t) => t.wrap = false));
+  on('center', () => batchTitles('recenter titles', (t) => {
+    t.x = TITLE_DEF_X; t.y = TITLE_DEF_Y;
+  }));
+  on('clear', () => { clearTitleSel(); renderTitles(); invalidate(); updateStatus(); drawTl(); });
+  on('del', deleteSelectedTitles);
 }
 
 function bumpGlobalFont(d) {
@@ -1218,7 +1333,7 @@ function historyRestore(snap) {
   State.doc.titles = st.titles || [];
   if (st.title_scale != null) State.doc.title_scale = st.title_scale;
   State.selected = clamp(st.selected, -1, segs().length - 1);
-  State.selMarker = -1; State.selTitle = -1; clearSelRange();
+  State.selMarker = -1; clearSelRange(); clearTitleSel();
   State._undoTag = null;
   invalidate();
   if (st.layout && st.layout.join() !== State.doc.layout.join()) {
@@ -1492,8 +1607,8 @@ function loadDoc(doc) {
   if (State.doc.title_scale == null) State.doc.title_scale = 1;
   State.selected = -1;
   State.selMarker = -1;
-  State.selTitle = -1;
   clearSelRange();
+  clearTitleSel();
   State.undoStack = [];
   State.redoStack = [];
   State._undoTag = null;
@@ -2018,7 +2133,7 @@ function tlDown(e) {
   if (mk) {
     // select the marker and park the playhead exactly on it (S cuts there)
     State.selMarker = mk.mi;
-    State.selected = -1; State.selTitle = -1; clearSelRange();
+    State.selected = -1; clearSelRange(); clearTitleSel();
     seekOut(mk.T);
     invalidate();
     updateStatus();
@@ -2027,7 +2142,7 @@ function tlDown(e) {
   }
   const th = titleLaneHit(x, y);
   if (th) {
-    State.selTitle = th.ti;
+    State.selTitle = th.ti; State.selTitleSet = new Set();
     State.selected = -1; State.selMarker = -1; clearSelRange();
     const t = titles()[th.ti];
     if (th.edge) {
@@ -2329,12 +2444,13 @@ function bindKeys() {
       case 'Backspace': case 'Delete':
         e.preventDefault();
         if (State.selMarker >= 0) deleteSelectedMarker();
+        else if (State.selTitleSet.size) deleteSelectedTitles();
         else if (State.selTitle >= 0) deleteTitle(State.selTitle);
         else deleteSelected();
         break;
       case 'Escape':
-        State.selected = -1; State.selMarker = -1; State.selTitle = -1;
-        clearSelRange();
+        State.selected = -1; State.selMarker = -1;
+        clearSelRange(); clearTitleSel();
         invalidate(); updateStatus(); drawTl(); break;
       case '+': case '=':
         zoomView(1 / 1.5); drawTl(); break;

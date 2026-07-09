@@ -77,7 +77,21 @@
 /* Title overlay covers the whole portrait stage (not a single pane). */
 #stage .title-overlay { inset: 0; left: 0; top: 0; width: 100%; height: 100%; z-index: 5; }
 .tfont-global { color: var(--muted); display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+/* batch toolbar shown when 2+ titles are multi-selected */
+.title-batch {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 8px 0 4px; padding: 7px 10px;
+  background: rgba(192,132,252,0.12); border: 1px solid var(--title, #c084fc);
+  border-radius: 9px;
+}
+.title-batch[hidden] { display: none; }
+.title-batch .tb-count { font-weight: 600; color: var(--text); font-size: 12px; }
+.title-batch .tb-group { display: inline-flex; gap: 2px; }
+.title-batch .spacer { flex: 1; }
+
 #titleList { margin-top: 6px; }
+/* extra emphasis on a multi-selected row (beyond the base .sel style) */
+#titleList li.sel { outline: 1px solid var(--title, #c084fc); }
 /* multi-line title inputs */
 #titleList li textarea.ttext {
   resize: none; overflow: hidden; min-height: 26px; line-height: 1.35;

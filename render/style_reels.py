@@ -96,8 +96,10 @@ def title_filter(titles, work_dir, gscale, pw, ph):
                  f"if(lt(t,{b:.3f}),({b:.3f}-t)/{fd:.3f},0))))'")
         tail = f"x={x_expr}:enable='between(t,{a:.3f},{b:.3f})':{alpha}"
         wrap = ttl.get("wrap") is not False        # default on
-        mains = _wrap(ttl.get("text") or "", max(6, round(40 / s)), wrap)
-        subs = _wrap(ttl.get("subtitle") or "", max(8, round(56 / s)), wrap)
+        # portrait 1080-wide char caps — keep in lockstep with title_image.py
+        # and editor/reels.js TITLE_*_MAX_CHARS (wrap preview == export)
+        mains = _wrap(ttl.get("text") or "", max(6, round(17 / s)), wrap)
+        subs = _wrap(ttl.get("subtitle") or "", max(8, round(29 / s)), wrap)
         gap = fs_main * 0.5 if (mains and subs) else 0
         block_h = len(mains) * lh_main + gap + len(subs) * lh_sub
         y0 = cy * ph - block_h / 2
