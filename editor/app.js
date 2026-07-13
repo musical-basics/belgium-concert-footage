@@ -212,21 +212,35 @@ function segOverride(p, s) {
 function effCamera(p, s) {
   if (s.camera === '5d2') return '5d2';
   const ov = segOverride(p, s);
-  if (ov) return ov.camera;
+  if (ov && ov.camera) return ov.camera;
   return s.seed_camera || s.camera;
 }
 
-// Set (or clear, camera=null) the override for a plan segment. Replaces any
-// override matching the same segment; arrays are swapped (not mutated) so the
-// shallow undo snapshots stay correct.
-function setSegOverride(p, s, camera) {
+// Pending per-cut Ken Burns pick ('in' | 'out' | 'none'), or null = auto
+// (follow the performance's ✨ zoom camera list, alternating by cut parity).
+function effKb(p, s) {
+  const ov = segOverride(p, s);
+  return (ov && ov.kb) || null;
+}
+
+// Patch the override for a plan segment: {camera: id|null} and/or
+// {kb: 'in'|'out'|'none'|null}; null clears that half, and the entry is
+// dropped entirely once nothing remains. Arrays are swapped (not mutated)
+// so the shallow undo snapshots stay correct.
+function setSegOverride(p, s, patch) {
   const perf = planPerf(p);
   if (!perf || s.camera === '5d2') return;
   pushUndo();
   const mid = (s.start + s.end) / 2;
+  const old = (perf.camera_overrides || []).find(o => o.start <= mid && mid < o.end) || {};
   const rest = (perf.camera_overrides || []).filter(o => !(o.start <= mid && mid < o.end));
   const seeded = s.seed_camera || s.camera;
-  if (camera && camera !== seeded) rest.push({ start: s.start, end: s.end, camera });
+  const camera = 'camera' in patch ? patch.camera : old.camera;
+  const kb = 'kb' in patch ? patch.kb : old.kb;
+  const next = { start: s.start, end: s.end };
+  if (camera && camera !== seeded) next.camera = camera;
+  if (kb) next.kb = kb;
+  if (next.camera || next.kb) rest.push(next);
   perf.camera_overrides = rest.length ? rest.sort((a, b) => a.start - b.start) : null;
   markDirty();
   State.activeCam = '';            // force the pane ring to re-evaluate
@@ -1338,8 +1352,10 @@ function rebuildStatic() {
         ctx.strokeRect(x0 + 0.75, CAM_Y0 + 1.25, Math.max(x1 - x0 - 1.5, 1), CAM_LANE_H - 2.5);
       }
       if (x1 - x0 > 34) {
+        const kb = cam !== '5d2' && effKb(p, s);
+        const glyph = kb === 'in' ? ' ↗' : kb === 'out' ? ' ↘' : kb === 'none' ? ' ⊘' : '';
         ctx.fillStyle = 'rgba(0,0,0,0.75)';
-        ctx.fillText(st.label || cam, x0 + 3, CAM_Y0 + 11);
+        ctx.fillText((st.label || cam) + glyph, x0 + 3, CAM_Y0 + 11);
       }
     });
   });
@@ -1715,16 +1731,31 @@ function showCamPick(hit, clientX, clientY) {
     el.innerHTML = `<span class="cphint">5D 2 live coverage — no other camera has this footage</span>`;
   } else {
     const cams = State.clips.filter(c => !c.live);
-    el.innerHTML = cams.map(c => {
+    const camRow = cams.map(c => {
       const st = CAM_COLORS[c.id] || {};
       return `<button data-cam="${c.id}" class="${c.id === cur ? 'on' : ''}"
         style="--cc:${st.line || '#999'}">${escapeHtml(st.label || c.label)}${c.id === seeded ? ' •' : ''}</button>`;
     }).join('') + `<button data-cam="" class="cpseed" title="back to the seeded pick">↺ seed</button>`;
+    // Ken Burns per-cut: in/out force the move, none kills it, auto follows the
+    // performance's ✨ zoom list (alternating by cut parity — shown in the label).
+    const kb = effKb(p, s);
+    const perf = planPerf(p);
+    const kbOn = !!(perf && (perf.kenburns || []).includes(cur));
+    const autoLabel = kbOn ? `auto (${hit.s % 2 === 0 ? '↗' : '↘'})` : 'auto (off)';
+    const zoomRow = `<span class="cplab">zoom</span>` + [
+      ['in', '↗ in'], ['out', '↘ out'], ['none', '⊘ none'],
+    ].map(([v, lab]) =>
+      `<button data-kb="${v}" class="cpkb ${kb === v ? 'on' : ''}">${lab}</button>`
+    ).join('') +
+      `<button data-kb="" class="cpkb cpseed ${kb ? '' : 'on'}"
+        title="follow this performance's ✨ zoom setting">${autoLabel}</button>`;
+    el.innerHTML = `<div class="cprow">${camRow}</div><div class="cprow">${zoomRow}</div>`;
     el.onclick = (e) => {
       const b = e.target.closest('button');
       if (!b) return;
-      setSegOverride(p, s, b.dataset.cam || null);
-      hideCamPick();
+      if ('kb' in b.dataset) setSegOverride(p, s, { kb: b.dataset.kb || null });
+      else setSegOverride(p, s, { camera: b.dataset.cam || null });
+      showCamPick(hit, clientX, clientY);   // stay open, refresh the highlights
     };
   }
   document.body.appendChild(el);

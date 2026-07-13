@@ -157,10 +157,14 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
 
 /* Camera-lane angle picker (click a cut-plan segment on the timeline) */
 #camPick {
-  position: fixed; z-index: 60; display: flex; gap: 4px; align-items: center;
+  position: fixed; z-index: 60; display: flex; flex-direction: column; gap: 4px;
   background: #171b24; border: 1px solid var(--line); border-radius: 8px;
   padding: 6px; box-shadow: 0 6px 24px rgba(0,0,0,0.5);
 }
+#camPick .cprow { display: flex; gap: 4px; align-items: center; }
+#camPick .cplab { font-size: 10px; color: #8892a4; text-transform: uppercase;
+  letter-spacing: 0.06em; padding-right: 2px; }
+#camPick button.cpkb { --cc: #c084fc; }
 #camPick button {
   padding: 3px 10px; font-size: 12px; border-radius: 6px;
   border: 1px solid var(--cc, var(--line)); color: var(--cc, #ccc);

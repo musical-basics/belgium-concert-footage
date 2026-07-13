@@ -161,9 +161,10 @@ _SCHEMA = """
         -- optional JSON list of camera ids that get a mild Ken Burns zoom on
         -- their cuts in this piece (render.py kb_vf_for); NULL = off
         kenburns TEXT,
-        -- optional JSON list [{start, end, camera}] (concert seconds) of manual
-        -- angle picks made after seeing the seeded plan (render/plan.py applies
-        -- them as a final pass); NULL = pure seeded plan
+        -- optional JSON list [{start, end, camera?, kb?}] (concert seconds) of
+        -- manual per-cut picks made after seeing the seeded plan: camera =
+        -- angle, kb = Ken Burns "in"/"out"/"none" (render/plan.py applies them
+        -- as a final pass); NULL = pure seeded plan
         camera_overrides TEXT
     );
     -- On-screen text overlays ("titles"), each shown over the final render for
@@ -1462,7 +1463,8 @@ def render_plans():
                 "performance": p.get("performance"), "title": p.get("title"),
                 "segments": [{"start": s["start"], "end": s["end"], "camera": s["camera"],
                               **({"overridden": True} if s.get("overridden") else {}),
-                              **({"seed_camera": s["seed_camera"]} if s.get("seed_camera") else {})}
+                              **({"seed_camera": s["seed_camera"]} if s.get("seed_camera") else {}),
+                              **({"kb": s["kb"]} if s.get("kb") else {})}
                              for s in p.get("segments", [])],
             })
         except Exception:

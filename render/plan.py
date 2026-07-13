@@ -96,12 +96,14 @@ def build_segments(t_in, t_out, transitions, seed, index,
     the ORIGINAL unweighted rng.choice path runs, so existing seeds keep
     producing byte-identical plans.
 
-    camera_overrides: optional [{"start", "end", "camera"}] in concert time —
-    manual angle picks made in the editor AFTER seeing the seeded plan. Applied
-    as a final pass: a segment whose midpoint falls inside an override range
-    takes that camera. Overrides never touch forced live (5D 2) coverage — the
-    live camera is the only source with footage there — and they don't perturb
-    the rng, so un-overridden segments keep their seeded camera."""
+    camera_overrides: optional [{"start", "end", "camera"?, "kb"?}] in concert
+    time — manual per-cut picks made in the editor AFTER seeing the seeded
+    plan. Applied as a final pass: a segment whose midpoint falls inside an
+    override range takes that camera and/or Ken Burns direction ("in" | "out" |
+    "none" — forces/kills the zoom for that cut regardless of the performance's
+    kenburns list; absent = auto). Overrides never touch forced live (5D 2)
+    coverage — the live camera is the only source with footage there — and they
+    don't perturb the rng, so un-overridden segments keep their seeded camera."""
     rng = _rng(seed, index)
     total = t_out - t_in
     live = _usable_live(t_in, t_out, live_clips)
@@ -188,22 +190,35 @@ def build_segments(t_in, t_out, transitions, seed, index,
 
     # 5) manual overrides (editor picks) — after the seed so the seeded plan is
     #    stable and only the touched segments change. Live segments are left
-    #    alone (no other camera has that footage); unknown cameras are ignored.
-    n_overridden = 0
+    #    alone (no other camera has that footage); unknown cameras/kb values
+    #    are ignored.
+    touched = set()
     for ov in camera_overrides or []:
         cam = ov.get("camera")
         if cam not in CAMERAS:
+            cam = None
+        kb = ov.get("kb")
+        if kb not in ("in", "out", "none"):
+            kb = None
+        if cam is None and kb is None:
             continue
         a, b = float(ov["start"]), float(ov["end"])
         for s in segments:
             if s["camera"] == LIVE_CAMERA:
                 continue
             mid = (s["start"] + s["end"]) / 2
-            if a <= mid < b and s["camera"] != cam:
+            if not (a <= mid < b):
+                continue
+            if cam and s["camera"] != cam:
                 s.setdefault("seed_camera", s["camera"])   # editor can restore the seeded pick
                 s["camera"] = cam
                 s["overridden"] = True
-                n_overridden += 1
+                touched.add(s["index"])
+            if kb:
+                s["kb"] = kb                               # render.py: force/kill the Ken Burns move
+                s["overridden"] = True
+                touched.add(s["index"])
+    n_overridden = len(touched)
 
     n_audio = sum(1 for s in segments if s["cut_type"] == "audio")
     n_live = sum(1 for s in segments if s["camera"] == LIVE_CAMERA)

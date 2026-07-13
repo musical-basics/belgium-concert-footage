@@ -257,12 +257,15 @@ def vf_for(cam):
 KB_AMOUNT = 0.07
 
 
-def kb_vf_for(cam, duration, seg_index):
-    """Full -vf chain for one Ken Burns segment (grade + zoom + house format)."""
+def kb_vf_for(cam, duration, seg_index, direction=None):
+    """Full -vf chain for one Ken Burns segment (grade + zoom + house format).
+    direction: "in"/"out" forces the move (per-cut editor override); None keeps
+    the default alternation by segment index (even = push in, odd = pull out)."""
     eq = eq_filter(CAMERA_GRADES.get(cam))
     frames = max(int(round(duration * FPS)), 2)
     prog = f"on/{frames - 1}"
-    z = (f"1+{KB_AMOUNT}*{prog}" if seg_index % 2 == 0
+    push_in = (seg_index % 2 == 0) if direction is None else (direction == "in")
+    z = (f"1+{KB_AMOUNT}*{prog}" if push_in
          else f"1+{KB_AMOUNT}*(1-{prog})")
     chain = (f"scale={W*2}:{H*2}:force_original_aspect_ratio=decrease,"
              f"pad={W*2}:{H*2}:(ow-iw)/2:(oh-ih)/2,"
@@ -430,8 +433,15 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), ti
             out = os.path.join(seg_dir, f"seg_{s['index']:04d}.mp4")
             # the live camera lives on its own clock: src = concert_t - delta
             seek = s["start"] - s["delta"] if "delta" in s else s["start"]
-            vf = (kb_vf_for(s["camera"], s["duration"], s["index"])
-                  if s["camera"] in kb_cams else vf_for(s["camera"]))
+            # Ken Burns: a per-cut override ("in"/"out"/"none" from the editor)
+            # beats the performance-level kenburns camera list.
+            kb = s.get("kb")
+            if kb in ("in", "out"):
+                vf = kb_vf_for(s["camera"], s["duration"], s["index"], direction=kb)
+            elif kb == "none" or s["camera"] not in kb_cams:
+                vf = vf_for(s["camera"])
+            else:
+                vf = kb_vf_for(s["camera"], s["duration"], s["index"])
             run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                  *hw,
                  "-ss", f"{seek:.3f}", "-i", src_path(s["camera"]),

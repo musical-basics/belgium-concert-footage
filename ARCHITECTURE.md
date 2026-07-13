@@ -36,10 +36,12 @@ Stored in `markers.db`, mirrored to `markers.json` (what render scripts read):
   no-repeat rule permits — see `render/plan.py`; `kenburns` = optional list of
   camera ids whose cuts get a mild alternating zoom in/out, render-only —
   see `kb_vf_for` in `render/render.py`; `camera_overrides` = optional list of
-  `{start, end, camera}` (concert seconds) manual angle picks made in the v1
-  editor's CAM timeline lane after seeing the seeded plan — applied as a final
-  pass over the seeded assignment, matched by segment midpoint, never touching
-  forced 5D 2 coverage — see `build_segments` in `render/plan.py`)
+  `{start, end, camera?, kb?}` (concert seconds) manual per-cut picks made in
+  the v1 editor's CAM timeline lane after seeing the seeded plan — `camera`
+  swaps the angle, `kb` `"in"|"out"|"none"` forces/kills that cut's Ken Burns
+  move regardless of the `kenburns` list — applied as a final pass over the
+  seeded assignment, matched by segment midpoint, never touching forced 5D 2
+  coverage — see `build_segments` in `render/plan.py`)
 - `titles` — burned-in text overlays
 - `regions` — **generic style regions**: `{kind, perf, in, out, rank, cam}`
   - `kind: "applause"` — crowd reaction for performance `perf`; `rank` 1–10
