@@ -160,7 +160,11 @@ _SCHEMA = """
         camera_weights TEXT,
         -- optional JSON list of camera ids that get a mild Ken Burns zoom on
         -- their cuts in this piece (render.py kb_vf_for); NULL = off
-        kenburns TEXT
+        kenburns TEXT,
+        -- optional JSON list [{start, end, camera}] (concert seconds) of manual
+        -- angle picks made after seeing the seeded plan (render/plan.py applies
+        -- them as a final pass); NULL = pure seeded plan
+        camera_overrides TEXT
     );
     -- On-screen text overlays ("titles"), each shown over the final render for
     -- its [in_s, out_s] window (global concert seconds). `subtitle` is an
@@ -270,6 +274,8 @@ def db_connect():
         conn.execute("ALTER TABLE performances ADD COLUMN camera_weights TEXT")
     if "kenburns" not in fcols:
         conn.execute("ALTER TABLE performances ADD COLUMN kenburns TEXT")
+    if "camera_overrides" not in fcols:
+        conn.execute("ALTER TABLE performances ADD COLUMN camera_overrides TEXT")
     return conn
 
 
@@ -308,7 +314,7 @@ def db_init():
 # that doesn't know a field (stale tab, older tool) omits the KEY entirely —
 # it inherits the stored value by ordinal so its saves can't wipe the data.
 # A client that knows the field sends it explicitly (null = clear).
-_PERF_JSON_FIELDS = ("camera_weights", "kenburns")
+_PERF_JSON_FIELDS = ("camera_weights", "kenburns", "camera_overrides")
 
 
 def _write_performances(conn, perfs):
@@ -324,7 +330,7 @@ def _write_performances(conn, perfs):
     conn.executemany(
         "INSERT INTO performances "
         f"(ordinal, title, composer, in_s, out_s, {', '.join(_PERF_JSON_FIELDS)}) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        f"VALUES ({', '.join('?' * (5 + len(_PERF_JSON_FIELDS)))})",
         [(i, p.get("title"), p.get("composer"), p.get("in"), p.get("out"),
           *(_field_json(i, p, f) for f in _PERF_JSON_FIELDS))
          for i, p in enumerate(perfs)],
@@ -377,9 +383,10 @@ def _load(conn):
             return None
     meta["performances"] = [
         {"title": r["title"], "composer": r["composer"], "in": r["in_s"], "out": r["out_s"],
-         "camera_weights": _pj(r["camera_weights"]), "kenburns": _pj(r["kenburns"])}
+         "camera_weights": _pj(r["camera_weights"]), "kenburns": _pj(r["kenburns"]),
+         "camera_overrides": _pj(r["camera_overrides"])}
         for r in conn.execute(
-            "SELECT title, composer, in_s, out_s, camera_weights, kenburns "
+            "SELECT title, composer, in_s, out_s, camera_weights, kenburns, camera_overrides "
             "FROM performances ORDER BY ordinal"
         )
     ]
@@ -1442,7 +1449,10 @@ def render_plans():
     if not os.path.isdir(OUT_DIR):
         return plans
     for fn in sorted(os.listdir(OUT_DIR)):
-        if not fn.endswith(".plan.json"):
+        # Only the highlights renderer's per-performance plans (NN_slug.plan.json);
+        # other styles (reels, …) write their own plan sidecars with different
+        # shapes/timelines that must not paint the editor's camera lane.
+        if not fn.endswith(".plan.json") or not re.match(r"^\d{2}_", fn):
             continue
         try:
             with open(os.path.join(OUT_DIR, fn)) as f:
@@ -1450,7 +1460,9 @@ def render_plans():
             plans.append({
                 "in": p.get("in"), "out": p.get("out"),
                 "performance": p.get("performance"), "title": p.get("title"),
-                "segments": [{"start": s["start"], "end": s["end"], "camera": s["camera"]}
+                "segments": [{"start": s["start"], "end": s["end"], "camera": s["camera"],
+                              **({"overridden": True} if s.get("overridden") else {}),
+                              **({"seed_camera": s["seed_camera"]} if s.get("seed_camera") else {})}
                              for s in p.get("segments", [])],
             })
         except Exception:

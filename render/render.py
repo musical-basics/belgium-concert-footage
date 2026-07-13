@@ -374,10 +374,12 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), ti
     transitions, _beats = detect_transitions(src_path(audio_cam), t_in, t_out)
     segments, stats = build_segments(t_in, t_out, transitions, seed, index,
                                      live_clips=live_clips,
-                                     camera_weights=perf.get("camera_weights"))
+                                     camera_weights=perf.get("camera_weights"),
+                                     camera_overrides=perf.get("camera_overrides"))
     print(f"  plan: {stats['segments']} segments  "
           f"({stats['audio_cuts']} audio-snapped, {stats['heuristic_cuts']} heuristic cuts, "
-          f"{stats['live_segments']} live/5D2 covering {stats['live_seconds']:.1f}s)")
+          f"{stats['live_segments']} live/5D2 covering {stats['live_seconds']:.1f}s, "
+          f"{stats['overridden']} manually overridden)")
 
     # Titles whose window overlaps this performance, with times shifted to the
     # clip's local (0-based) timeline for the overlay/plan.
@@ -398,6 +400,7 @@ def render_performance(perf, index, seed, audio_cam, encoder, dry, titles=(), ti
         "performance": index + 1, "title": title, "composer": perf.get("composer", ""),
         "in": t_in, "out": t_out, "seed": seed, "audio_source": audio_cam,
         "camera_weights": perf.get("camera_weights"),
+        "camera_overrides": perf.get("camera_overrides"),
         "kenburns": perf.get("kenburns"),
         "stats": stats, "segments": segments, "titles": perf_titles,
     }

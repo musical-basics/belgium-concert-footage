@@ -151,9 +151,24 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding
   border: 1px solid #2f5d8a; border-radius: 4px; padding: 1px 6px; }
 #livebar .liveinfo { color: #cfe3f7; font-size: 12px; font-variant-numeric: tabular-nums; }
 #wave {
-  display: block; width: 100%; height: var(--wave-h, 170px); background: var(--panel);
+  display: block; width: 100%; height: var(--wave-h, 184px); background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px; cursor: crosshair;
 }
+
+/* Camera-lane angle picker (click a cut-plan segment on the timeline) */
+#camPick {
+  position: fixed; z-index: 60; display: flex; gap: 4px; align-items: center;
+  background: #171b24; border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px; box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+}
+#camPick button {
+  padding: 3px 10px; font-size: 12px; border-radius: 6px;
+  border: 1px solid var(--cc, var(--line)); color: var(--cc, #ccc);
+  background: transparent; cursor: pointer;
+}
+#camPick button.on { background: var(--cc); color: #0b0e14; font-weight: 600; }
+#camPick button.cpseed { --cc: #98a2b3; }
+#camPick .cphint { font-size: 11px; color: #8fb4d9; padding: 2px 6px; }
 #overview {
   display: block; width: 100%; height: 46px; background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; cursor: pointer;

@@ -88,12 +88,20 @@ def _weights_for_no_repeat(target):
 
 
 def build_segments(t_in, t_out, transitions, seed, index,
-                   first_camera=None, live_clips=None, camera_weights=None):
+                   first_camera=None, live_clips=None, camera_weights=None,
+                   camera_overrides=None):
     """camera_weights: optional {camera_id: relative_weight} for the stationary
     cameras (e.g. {"back": 25, "livestream": 25, "piano": 50}). Weight 0 (or
     negative) removes that camera from this performance entirely. When absent,
     the ORIGINAL unweighted rng.choice path runs, so existing seeds keep
-    producing byte-identical plans."""
+    producing byte-identical plans.
+
+    camera_overrides: optional [{"start", "end", "camera"}] in concert time —
+    manual angle picks made in the editor AFTER seeing the seeded plan. Applied
+    as a final pass: a segment whose midpoint falls inside an override range
+    takes that camera. Overrides never touch forced live (5D 2) coverage — the
+    live camera is the only source with footage there — and they don't perturb
+    the rng, so un-overridden segments keep their seeded camera."""
     rng = _rng(seed, index)
     total = t_out - t_in
     live = _usable_live(t_in, t_out, live_clips)
@@ -178,6 +186,25 @@ def build_segments(t_in, t_out, transitions, seed, index,
             seg["delta"] = cov["delta"]
         segments.append(seg)
 
+    # 5) manual overrides (editor picks) — after the seed so the seeded plan is
+    #    stable and only the touched segments change. Live segments are left
+    #    alone (no other camera has that footage); unknown cameras are ignored.
+    n_overridden = 0
+    for ov in camera_overrides or []:
+        cam = ov.get("camera")
+        if cam not in CAMERAS:
+            continue
+        a, b = float(ov["start"]), float(ov["end"])
+        for s in segments:
+            if s["camera"] == LIVE_CAMERA:
+                continue
+            mid = (s["start"] + s["end"]) / 2
+            if a <= mid < b and s["camera"] != cam:
+                s.setdefault("seed_camera", s["camera"])   # editor can restore the seeded pick
+                s["camera"] = cam
+                s["overridden"] = True
+                n_overridden += 1
+
     n_audio = sum(1 for s in segments if s["cut_type"] == "audio")
     n_live = sum(1 for s in segments if s["camera"] == LIVE_CAMERA)
     stats = {
@@ -188,6 +215,7 @@ def build_segments(t_in, t_out, transitions, seed, index,
         "live_segments": n_live,
         "live_seconds": round(sum(s["duration"] for s in segments
                                   if s["camera"] == LIVE_CAMERA), 3),
+        "overridden": n_overridden,
     }
     return segments, stats
 

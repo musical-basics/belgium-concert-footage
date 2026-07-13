@@ -39,6 +39,7 @@ const State = {
   outputs: {},         // 1-based index -> existing output filename on disk
   plans: [],           // rendered cut plans: [{in,out,segments:[{start,end,camera}]}]
   activeCam: null,     // camera id shown at the current playhead (per the plan)
+  selectedSeg: null,   // {p, s} plan/segment indices of the selected camera-lane segment
   titles: [],          // on-screen text overlays {text, subtitle, in, out, x, y, scale}
   regions: [],         // style regions {kind, perf, in, out, rank, cam} — applause/highlight for the Short
   selectedTitle: -1,
@@ -64,13 +65,24 @@ const MIN_SPAN = 4;                // most-zoomed-in window (seconds)
 // Timeline vertical layout (px from the top of the wave canvas):
 //   0 .. TICK_H        time ticks / labels
 //   TICK_H .. LIVE_Y0  the title lane (text-overlay regions)
-//   LIVE_Y0 .. PERF_Y0 the live-camera lane (audio-matched 5D 2 scenes)
+//   LIVE_Y0 .. CAM_Y0  the live-camera lane (audio-matched 5D 2 scenes)
+//   CAM_Y0 .. PERF_Y0  the camera lane (the rendered cut plan; click = pick angle)
 //   PERF_Y0 .. h       the performance blocks
 const TICK_H = 14;
 const TITLE_LANE_H = 24;
 const LIVE_LANE_H = 20;
+const CAM_LANE_H = 14;
 const LIVE_Y0 = TICK_H + TITLE_LANE_H;
-const PERF_Y0 = LIVE_Y0 + LIVE_LANE_H;
+const CAM_Y0 = LIVE_Y0 + LIVE_LANE_H;
+const PERF_Y0 = CAM_Y0 + CAM_LANE_H;
+
+// Camera lane palette — one hue per angle so the cut plan reads at a glance.
+const CAM_COLORS = {
+  back:       { fill: 'rgba(79,140,255,0.60)',  line: '#4f8cff', label: 'Back' },
+  livestream: { fill: 'rgba(52,211,153,0.60)',  line: '#34d399', label: 'Stream' },
+  piano:      { fill: 'rgba(245,158,11,0.60)',  line: '#f59e0b', label: 'Piano' },
+  '5d2':      { fill: 'rgba(127,178,230,0.45)', line: '#7fb2e6', label: '5D 2' },
+};
 
 // Title word-wrap limits — must match render/render.py so the live preview's
 // line breaks are identical to the burned-in render.
@@ -154,18 +166,72 @@ async function loadPlans() {
   } catch { /* leave the previous plans in place */ }
 }
 
-// Camera id shown at global time t per the rendered plan, or null if no plan
-// covers t (that performance hasn't been rendered yet).
+// Camera id shown at global time t per the rendered plan (with any unsaved
+// manual overrides applied), or null if no plan covers t (that performance
+// hasn't been rendered yet). Plan segment times are concert-global, same as t.
 function activeCameraAt(t) {
   for (const p of State.plans) {
     if (t < p.in || t > p.out) continue;
-    const local = t - p.in;
     for (const s of p.segments) {
-      if (local >= s.start && local < s.end) return s.camera;
+      if (t >= s.start && t < s.end) return effCamera(p, s);
     }
     return null;
   }
   return null;
+}
+
+/* ------------------------------------------- manual camera overrides */
+// Overrides live on the PERFORMANCE ({start, end, camera} in concert seconds,
+// exactly one per plan segment, matched by segment midpoint) so they persist
+// through markers.json to render/plan.py. The editor applies them on top of
+// the loaded plan for an instant preview; the next render bakes them in.
+
+// The performance a plan belongs to (max overlap — in/out may have been
+// nudged since the render), or null.
+function planPerf(p) {
+  let best = null, bestOv = 0;
+  for (const perf of State.perfs) {
+    const ov = Math.min(p.out, perf.out) - Math.max(p.in, perf.in);
+    if (ov > bestOv) { bestOv = ov; best = perf; }
+  }
+  return best;
+}
+
+// The pending override covering plan segment s, or null.
+function segOverride(p, s) {
+  const perf = planPerf(p);
+  if (!perf || !perf.camera_overrides) return null;
+  const mid = (s.start + s.end) / 2;
+  return perf.camera_overrides.find(o => o.start <= mid && mid < o.end) || null;
+}
+
+// What the render WILL show for this segment: pending override > the plan's
+// original seeded camera (seed_camera survives a previously baked override,
+// so clearing an override restores the true seeded pick). 5D 2 coverage is
+// forced footage — never overridable.
+function effCamera(p, s) {
+  if (s.camera === '5d2') return '5d2';
+  const ov = segOverride(p, s);
+  if (ov) return ov.camera;
+  return s.seed_camera || s.camera;
+}
+
+// Set (or clear, camera=null) the override for a plan segment. Replaces any
+// override matching the same segment; arrays are swapped (not mutated) so the
+// shallow undo snapshots stay correct.
+function setSegOverride(p, s, camera) {
+  const perf = planPerf(p);
+  if (!perf || s.camera === '5d2') return;
+  pushUndo();
+  const mid = (s.start + s.end) / 2;
+  const rest = (perf.camera_overrides || []).filter(o => !(o.start <= mid && mid < o.end));
+  const seeded = s.seed_camera || s.camera;
+  if (camera && camera !== seeded) rest.push({ start: s.start, end: s.end, camera });
+  perf.camera_overrides = rest.length ? rest.sort((a, b) => a.start - b.start) : null;
+  markDirty();
+  State.activeCam = '';            // force the pane ring to re-evaluate
+  updateActiveCam(playTime());
+  markTimelineDirty();
 }
 
 async function loadWaveform() {
@@ -1245,6 +1311,43 @@ function rebuildStatic() {
     ctx.fillText('5D 2', 3, LIVE_Y0 + 14);
   }
 
+  // camera lane: the rendered cut plan, one colored block per segment (with
+  // pending overrides applied). Click a block to pick a different angle.
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(0, CAM_Y0, t.w, CAM_LANE_H);
+  State.plans.forEach((p, pi) => {
+    p.segments.forEach((s, si) => {
+      const x0 = timeToX(s.start), x1 = timeToX(s.end);
+      if (x1 < 0 || x0 > t.w) return;
+      const cam = effCamera(p, s);
+      const st = CAM_COLORS[cam] || { fill: 'rgba(160,160,160,0.5)', line: '#999' };
+      const sel = State.selectedSeg && State.selectedSeg.p === pi && State.selectedSeg.s === si;
+      ctx.fillStyle = st.fill;
+      ctx.fillRect(x0, CAM_Y0 + 1, Math.max(x1 - x0, 1), CAM_LANE_H - 2);
+      // segment boundary tick
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(Math.round(x0) + 0.5, CAM_Y0 + 1);
+      ctx.lineTo(Math.round(x0) + 0.5, CAM_Y0 + CAM_LANE_H - 1); ctx.stroke();
+      // manual override -> white underline so hand-picked shots stand out
+      if (cam !== '5d2' && (segOverride(p, s) || (s.overridden && !s.seed_camera))) {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(x0 + 1, CAM_Y0 + CAM_LANE_H - 3, Math.max(x1 - x0 - 2, 1), 2);
+      }
+      if (sel) {
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(x0 + 0.75, CAM_Y0 + 1.25, Math.max(x1 - x0 - 1.5, 1), CAM_LANE_H - 2.5);
+      }
+      if (x1 - x0 > 34) {
+        ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        ctx.fillText(st.label || cam, x0 + 3, CAM_Y0 + 11);
+      }
+    });
+  });
+  if (State.plans.length) {
+    ctx.fillStyle = 'rgba(200,210,225,0.55)';
+    ctx.fillText('CAM', 3, CAM_Y0 + 11);
+  }
+
   // performance blocks
   const ph = t.h - PERF_Y0;
   State.perfs.forEach((p, i) => {
@@ -1441,6 +1544,23 @@ function liveHandleHit(x, y) {
   return null;
 }
 
+// Camera lane — the cut-plan strip, CAM_Y0 .. PERF_Y0.
+const inCamLane = (y) => y >= CAM_Y0 && y < PERF_Y0;
+
+function camSegHit(x, y) {
+  if (!inCamLane(y)) return null;
+  const tm = xToTime(x);
+  for (let pi = 0; pi < State.plans.length; pi++) {
+    const p = State.plans[pi];
+    if (tm < p.in || tm > p.out) continue;
+    for (let si = 0; si < p.segments.length; si++) {
+      const s = p.segments[si];
+      if (tm >= s.start && tm < s.end) return { p: pi, s: si };
+    }
+  }
+  return null;
+}
+
 // Live-adjust a 5D 2 clip edge. The clip has real footage only within its
 // matched envelope (orig), so a handle clamps to [orig.refIn, orig.refOut] and
 // can never make the clip shorter than MIN_LEN.
@@ -1569,6 +1689,56 @@ function moveTitle(drag, tm) {
   renderTitles(); markFullDirty();
 }
 
+/* --------------------------------------------- camera-lane pick popover */
+// Click a cut-plan segment -> a small popover with one button per stationary
+// camera (the seeded pick marked with •, the active one highlighted). Choosing
+// a camera stores a manual override on the performance; "seed" clears it.
+let _camPickEl = null;
+
+function hideCamPick() {
+  if (_camPickEl) { _camPickEl.remove(); _camPickEl = null; }
+  if (State.selectedSeg) { State.selectedSeg = null; markTimelineDirty(); }
+}
+
+function showCamPick(hit, clientX, clientY) {
+  hideCamPick();
+  const p = State.plans[hit.p], s = p.segments[hit.s];
+  if (!p || !s) return;
+  State.selectedSeg = hit;
+  markTimelineDirty();
+
+  const el = document.createElement('div');
+  el.id = 'camPick';
+  const seeded = s.seed_camera || s.camera;
+  const cur = effCamera(p, s);
+  if (s.camera === '5d2') {
+    el.innerHTML = `<span class="cphint">5D 2 live coverage — no other camera has this footage</span>`;
+  } else {
+    const cams = State.clips.filter(c => !c.live);
+    el.innerHTML = cams.map(c => {
+      const st = CAM_COLORS[c.id] || {};
+      return `<button data-cam="${c.id}" class="${c.id === cur ? 'on' : ''}"
+        style="--cc:${st.line || '#999'}">${escapeHtml(st.label || c.label)}${c.id === seeded ? ' •' : ''}</button>`;
+    }).join('') + `<button data-cam="" class="cpseed" title="back to the seeded pick">↺ seed</button>`;
+    el.onclick = (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      setSegOverride(p, s, b.dataset.cam || null);
+      hideCamPick();
+    };
+  }
+  document.body.appendChild(el);
+  const r = el.getBoundingClientRect();
+  el.style.left = `${Math.min(clientX, window.innerWidth - r.width - 8)}px`;
+  el.style.top = `${clientY - r.height - 10 < 8 ? clientY + 14 : clientY - r.height - 10}px`;
+  _camPickEl = el;
+}
+
+// Dismiss on any press outside the popover (capture phase so it wins).
+window.addEventListener('mousedown', (e) => {
+  if (_camPickEl && !_camPickEl.contains(e.target)) hideCamPick();
+}, true);
+
 function wireTimelineInput() {
   const t = State.tl;
   t.wave.addEventListener('wheel', (e) => {
@@ -1619,6 +1789,13 @@ function wireTimelineInput() {
       scrubbing = true; seekAll(xToTime(x));         // still scrubs the playhead
       return;
     }
+    const cs = camSegHit(x, y);                     // cut-plan segment -> pick the angle
+    if (cs) {
+      if (!State.playing) seekAll(xToTime(x));      // park the playhead on the shot
+      showCamPick(cs, e.clientX, e.clientY);
+      return;
+    }
+    if (inCamLane(y)) return;                       // empty lane (not rendered yet) — dead zone
     const h = handleHit(x, y);
     if (h) {                                        // perf edge -> resize, don't scrub
       drag = { kind: 'perf', ...h }; dragSnapped = false;
@@ -1704,7 +1881,7 @@ function wireTimelineInput() {
     t.wave.style.cursor =
       (handleHit(x, y) || titleHandleHit(x, y) || liveHandleHit(x, y)) ? 'ew-resize'
       : titleHit(x, y) >= 0 ? (e.altKey ? 'copy' : 'grab')   // alt = duplicate
-      : liveHit(x, y) >= 0 ? 'pointer'
+      : liveHit(x, y) >= 0 || camSegHit(x, y) ? 'pointer'
       : 'default';
   });
 
@@ -2724,6 +2901,7 @@ async function save({ auto = false } = {}) {
       title: p.title, composer: p.composer, in: p.in, out: p.out,
       camera_weights: p.camera_weights || null,
       kenburns: p.kenburns || null,
+      camera_overrides: p.camera_overrides || null,
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,
@@ -2886,7 +3064,8 @@ function wireKeys() {
         if (State.selectedLive >= 0) { e.preventDefault(); cutLiveAt(markTime()); }
         break;
       case 'Escape':
-        if (State.selectedLive >= 0) { e.preventDefault(); deselectLive(); }
+        if (_camPickEl) { e.preventDefault(); hideCamPick(); }
+        else if (State.selectedLive >= 0) { e.preventDefault(); deselectLive(); }
         break;
       case 't': case 'T':
         if (e.metaKey) break;          // leave ⌘T (new tab) to the browser
@@ -2920,6 +3099,7 @@ window.addEventListener('beforeunload', (e) => {
       title: p.title, composer: p.composer, in: p.in, out: p.out,
       camera_weights: p.camera_weights || null,
       kenburns: p.kenburns || null,
+      camera_overrides: p.camera_overrides || null,
     })),
     titles: State.titles.map(t => ({
       text: t.text, subtitle: t.subtitle || '', in: t.in, out: t.out,

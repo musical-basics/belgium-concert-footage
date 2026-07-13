@@ -28,14 +28,18 @@ values remain only as boot fallbacks).
 
 ### Markers (the data every style shares)
 Stored in `markers.db`, mirrored to `markers.json` (what render scripts read):
-- `performances` — the pieces: `{title, composer, in, out, camera_weights?, kenburns?}`
+- `performances` — the pieces: `{title, composer, in, out, camera_weights?, kenburns?, camera_overrides?}`
   (`camera_weights` = optional `{camera_id: relative weight}` steering the
   auto-cut's screen-time mix for that piece; weights are compensated for the
   no-back-to-back-repeat rule so the actual share matches the numbers; 0 =
   never use that camera; ≤2 cameras or >50% targets degrade to what the
   no-repeat rule permits — see `render/plan.py`; `kenburns` = optional list of
   camera ids whose cuts get a mild alternating zoom in/out, render-only —
-  see `kb_vf_for` in `render/render.py`)
+  see `kb_vf_for` in `render/render.py`; `camera_overrides` = optional list of
+  `{start, end, camera}` (concert seconds) manual angle picks made in the v1
+  editor's CAM timeline lane after seeing the seeded plan — applied as a final
+  pass over the seeded assignment, matched by segment midpoint, never touching
+  forced 5D 2 coverage — see `build_segments` in `render/plan.py`)
 - `titles` — burned-in text overlays
 - `regions` — **generic style regions**: `{kind, perf, in, out, rank, cam}`
   - `kind: "applause"` — crowd reaction for performance `perf`; `rank` 1–10
