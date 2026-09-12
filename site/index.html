@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Belgium Concert Highlights — Lionel Yu</title>
+<meta name="description" content="Sixteen performances from Lionel Yu's concert in Belgium, filmed on three cameras and cut to the music.">
+<meta property="og:title" content="Belgium Concert Highlights — Lionel Yu">
+<meta property="og:description" content="Sixteen performances, filmed on three cameras and cut to the music.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #0b0a0c;
+    --ink-2: #131216;
+    --line: #29262d;
+    --paper: #f2efe9;
+    --muted: #9a939f;
+    --gold: #c9a227;
+    --serif: "Cormorant Garamond", Georgia, "Times New Roman", serif;
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  /* One gutter for the whole page, set on the wrapper only. */
+  .wrap { max-width: 1180px; margin: 0 auto; padding-inline: 24px; }
+
+  /* ---- hero ---- */
+  header {
+    position: relative;
+    padding-block: clamp(72px, 14vw, 132px) clamp(40px, 7vw, 64px);
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+  }
+  header::before {
+    content: "";
+    position: absolute; inset: -40% -20% auto;
+    height: 520px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(201,162,39,.16), transparent 68%);
+    pointer-events: none;
+  }
+  .eyebrow {
+    position: relative;
+    font-size: 12px; font-weight: 500;
+    letter-spacing: .22em; text-transform: uppercase;
+    color: var(--gold);
+    margin: 0 0 18px;
+  }
+  h1 {
+    position: relative;
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(42px, 8.5vw, 88px);
+    line-height: 1.02;
+    letter-spacing: -.01em;
+    margin: 0 0 20px;
+  }
+  .lede {
+    position: relative;
+    max-width: 52ch;
+    margin: 0;
+    color: var(--muted);
+    font-size: clamp(15px, 1.9vw, 17px);
+    line-height: 1.65;
+  }
+  .stats {
+    position: relative;
+    display: flex; flex-wrap: wrap; gap: 28px;
+    margin-top: 34px;
+    font-size: 13px; color: var(--muted);
+  }
+  .stats b { display: block; font-family: var(--serif); font-size: 28px; color: var(--paper); font-weight: 500; }
+
+  /* ---- grid ---- */
+  main { padding-block: clamp(40px, 7vw, 72px) 96px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(288px, 1fr));
+    gap: 28px 24px;
+  }
+  .card {
+    display: flex; flex-direction: column;
+    background: none; border: 0; padding: 0; margin: 0;
+    color: inherit; font: inherit; text-align: left;
+    cursor: pointer;
+  }
+  .shot {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    max-width: 100%;
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    transition: transform .28s cubic-bezier(.2,.7,.3,1), border-color .28s;
+  }
+  .shot img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: .88; transition: opacity .28s, transform .5s cubic-bezier(.2,.7,.3,1); }
+  .card:hover .shot, .card:focus-visible .shot { transform: translateY(-3px); border-color: rgba(201,162,39,.55); }
+  .card:hover .shot img, .card:focus-visible .shot img { opacity: 1; transform: scale(1.035); }
+  .card:focus-visible { outline: none; }
+  .card:focus-visible .shot { box-shadow: 0 0 0 3px rgba(201,162,39,.45); }
+  .play {
+    position: absolute; inset: 0;
+    display: grid; place-items: center;
+    background: linear-gradient(to top, rgba(11,10,12,.55), transparent 55%);
+  }
+  .play span {
+    width: 52px; height: 52px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: rgba(11,10,12,.55);
+    border: 1px solid rgba(242,239,233,.35);
+    backdrop-filter: blur(3px);
+    transition: background .28s, border-color .28s;
+  }
+  .card:hover .play span { background: var(--gold); border-color: var(--gold); }
+  .play svg { width: 15px; height: 15px; margin-left: 3px; fill: var(--paper); transition: fill .28s; }
+  .card:hover .play svg { fill: var(--ink); }
+  .len {
+    position: absolute; right: 10px; bottom: 10px;
+    font-size: 11px; font-variant-numeric: tabular-nums;
+    padding: 3px 7px; border-radius: 4px;
+    background: rgba(11,10,12,.72); color: var(--paper);
+  }
+  .meta { padding-top: 14px; display: flex; gap: 14px; align-items: baseline; }
+  .num { font-family: var(--serif); font-size: 15px; color: var(--gold); min-width: 1.6em; }
+  .name { font-family: var(--serif); font-size: 22px; line-height: 1.25; margin: 0 0 4px; font-weight: 500; }
+  .by { font-size: 12.5px; color: var(--muted); margin: 0; }
+
+  /* ---- player ---- */
+  dialog {
+    border: 0; padding: 0; max-width: none; max-height: none;
+    width: 100%; height: 100%; background: transparent; color: var(--paper);
+  }
+  dialog::backdrop { background: rgba(6,5,7,.93); backdrop-filter: blur(6px); }
+  .stage { height: 100%; display: flex; flex-direction: column; padding: 16px; gap: 14px; }
+  .stage-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+  .stage-title { font-family: var(--serif); font-size: clamp(20px, 3.6vw, 30px); margin: 0; font-weight: 500; }
+  .stage-by { font-size: 12.5px; color: var(--muted); margin: 4px 0 0; }
+  .close {
+    flex: none;
+    background: none; border: 1px solid var(--line); color: var(--muted);
+    width: 38px; height: 38px; border-radius: 50%; font-size: 19px; line-height: 1;
+    cursor: pointer; transition: color .2s, border-color .2s;
+  }
+  .close:hover { color: var(--paper); border-color: var(--paper); }
+  .frame { flex: 1; min-height: 0; display: grid; place-items: center; }
+  .frame iframe { width: 100%; height: 100%; border: 0; border-radius: 8px; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-block: 34px 44px;
+    color: var(--muted); font-size: 12.5px; line-height: 1.7;
+  }
+  .empty { color: var(--muted); font-size: 15px; padding-block: 48px; }
+
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: 1fr; gap: 26px; }
+    .stats { gap: 20px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .shot, .shot img, .play span, .play svg { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <p class="eyebrow">Live · Belgium</p>
+    <h1>Belgium Concert<br>Highlights</h1>
+    <p class="lede">
+      Sixteen performances from one night at the piano — filmed on three cameras
+      and cut to the music, so the angle changes where the playing does.
+    </p>
+    <div class="stats">
+      <div><b id="statCount">—</b> performances</div>
+      <div><b id="statMins">—</b> minutes</div>
+      <div><b>3</b> camera angles</div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="grid" id="grid"></div>
+  <p class="empty" id="empty" hidden>Performances are still uploading — check back shortly.</p>
+</main>
+
+<footer class="wrap">
+  Performed and produced by Lionel Yu. Video hosted on Cloudflare Stream.
+</footer>
+
+<dialog id="player">
+  <div class="stage">
+    <div class="stage-top">
+      <div>
+        <h2 class="stage-title" id="stageTitle"></h2>
+        <p class="stage-by" id="stageBy"></p>
+      </div>
+      <button class="close" id="closeBtn" aria-label="Close player">&times;</button>
+    </div>
+    <div class="frame" id="frame"></div>
+  </div>
+</dialog>
+
+<script>
+(async function () {
+  const grid = document.getElementById('grid');
+  const empty = document.getElementById('empty');
+  const dialog = document.getElementById('player');
+  const frame = document.getElementById('frame');
+
+  const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+
+  let data;
+  try {
+    const res = await fetch('reels.json', { cache: 'no-cache' });
+    if (!res.ok) throw new Error(res.status);
+    data = await res.json();
+  } catch {
+    empty.hidden = false;
+    empty.textContent = 'Could not load the performance list.';
+    return;
+  }
+
+  const reels = data.reels ?? [];
+  if (!reels.length) { empty.hidden = false; return; }
+
+  document.getElementById('statCount').textContent = reels.length;
+  document.getElementById('statMins').textContent = Math.round((data.totalSeconds ?? 0) / 60);
+
+  const PLAY_ICON = '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M0 0l12 7-12 7z"/></svg>';
+
+  grid.innerHTML = reels.map((r, i) => `
+    <button class="card" data-i="${i}">
+      <div class="shot">
+        <img src="${r.thumbnail}" alt="" loading="lazy" width="1280" height="720">
+        <span class="play"><span>${PLAY_ICON}</span></span>
+        <span class="len">${mmss(r.duration)}</span>
+      </div>
+      <div class="meta">
+        <span class="num">${String(i + 1).padStart(2, '0')}</span>
+        <span>
+          <h3 class="name">${esc(r.title)}</h3>
+          ${r.composer ? `<p class="by">${esc(r.composer)}</p>` : ''}
+        </span>
+      </div>
+    </button>
+  `).join('');
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  grid.addEventListener('click', (e) => {
+    const card = e.target.closest('.card');
+    if (card) open(reels[Number(card.dataset.i)]);
+  });
+
+  function open(reel) {
+    document.getElementById('stageTitle').textContent = reel.title;
+    document.getElementById('stageBy').textContent = reel.composer ?? '';
+    // Built fresh each time: swapping the src on a reused iframe leaves the
+    // previous video's audio running in some browsers.
+    frame.innerHTML = `<iframe
+      src="https://iframe.videodelivery.net/${reel.uid}?autoplay=true"
+      style="aspect-ratio:${reel.portrait ? '9/16' : '16/9'};max-width:100%;max-height:100%"
+      allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture;"
+      allowfullscreen title="${esc(reel.title)}"></iframe>`;
+    dialog.showModal();
+  }
+
+  function close() { dialog.close(); }
+  document.getElementById('closeBtn').addEventListener('click', close);
+  // Tearing down the iframe on close is what actually stops playback.
+  dialog.addEventListener('close', () => { frame.innerHTML = ''; });
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) close(); });
+})();
+</script>
+</body>
+</html>

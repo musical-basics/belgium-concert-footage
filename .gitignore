@@ -43,3 +43,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Secrets — Cloudflare Stream credentials for the showcase uploader
+.env.local
+.env*.local
