@@ -18,6 +18,8 @@ const reels = Object.values(manifest.reels ?? {})
   .filter((r) => r.uid)
   .sort((a, b) => a.order - b.order)
   .map((r) => ({
+    // slug is what multicam.json keys its concert-clock ranges on
+    slug: r.slug,
     uid: r.uid,
     title: r.title,
     composer: r.composer || null,

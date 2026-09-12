@@ -34,6 +34,8 @@
 *.db-wal
 *.db-shm
 reels.json
+# ...but the showcase's generated reel list is part of the published site.
+!site/reels.json
 *.backup-*
 *.presqlite-*
 

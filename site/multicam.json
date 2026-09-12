@@ -1,0 +1,105 @@
+{
+  "base": "https://pub-31312e7a50af4ff884d733cd859354f5.r2.dev/belgium-concert/multicam",
+  "angles": [
+    {
+      "id": "back",
+      "label": "Back Camera",
+      "file": "back.mp4",
+      "audio": true
+    },
+    {
+      "id": "livestream",
+      "label": "Livestream",
+      "file": "livestream.mp4",
+      "audio": false
+    },
+    {
+      "id": "piano",
+      "label": "Next to Piano",
+      "file": "piano.mp4",
+      "audio": false
+    }
+  ],
+  "reels": [
+    {
+      "slug": "01_fantasie-impromptu",
+      "in": 0,
+      "out": 288.712
+    },
+    {
+      "slug": "02_prelude-in-g-minor",
+      "in": 329.174,
+      "out": 575.661
+    },
+    {
+      "slug": "03_rolling-thunder",
+      "in": 611.231,
+      "out": 926.032
+    },
+    {
+      "slug": "04_fight-for-freedom",
+      "in": 1119.625,
+      "out": 1480.332
+    },
+    {
+      "slug": "05_colors-of-the-soul",
+      "in": 1503.678,
+      "out": 1735.05
+    },
+    {
+      "slug": "06_torrent-etude",
+      "in": 1782.919,
+      "out": 1932.954
+    },
+    {
+      "slug": "07_torrent-edm-version",
+      "in": 1967.628,
+      "out": 2116.747
+    },
+    {
+      "slug": "08_fur-elise-and-nightmare",
+      "in": 2289.412,
+      "out": 2581.234
+    },
+    {
+      "slug": "09_canon-in-dream",
+      "in": 2604.22,
+      "out": 2848.877
+    },
+    {
+      "slug": "10_moonlight-sonata-nightmare",
+      "in": 2885.54,
+      "out": 3182.165
+    },
+    {
+      "slug": "11_dreams-of-a-violin-piano-violin",
+      "in": 3598.602,
+      "out": 3846.094
+    },
+    {
+      "slug": "12_gallop-20",
+      "in": 4033.579,
+      "out": 4365.763
+    },
+    {
+      "slug": "13_beethoven-virus",
+      "in": 4502.837,
+      "out": 4712.679
+    },
+    {
+      "slug": "14_four-seasons",
+      "in": 4963.337,
+      "out": 5244.809
+    },
+    {
+      "slug": "15_sunflowers",
+      "in": 5299.647,
+      "out": 5449.433
+    },
+    {
+      "slug": "16_still-dre",
+      "in": 5500.831,
+      "out": 5695.169
+    }
+  ]
+}

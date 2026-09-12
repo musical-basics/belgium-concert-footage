@@ -23,6 +23,8 @@
     --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   }
   * { box-sizing: border-box; }
+  /* A class selector beats the UA's [hidden] rule, so state it explicitly. */
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     background: var(--ink);
@@ -136,7 +138,7 @@
 
   /* ---- player ---- */
   dialog {
-    border: 0; padding: 0; max-width: none; max-height: none;
+    border: 0; padding: 0; margin: 0; max-width: none; max-height: none;
     width: 100%; height: 100%; background: transparent; color: var(--paper);
   }
   dialog::backdrop { background: rgba(6,5,7,.93); backdrop-filter: blur(6px); }
@@ -160,6 +162,50 @@
     color: var(--muted); font-size: 12.5px; line-height: 1.7;
   }
   .empty { color: var(--muted); font-size: 15px; padding-block: 48px; }
+
+
+  /* ---- multi-cam ---- */
+  .modes { display: flex; gap: 2px; padding: 3px; border-radius: 999px; background: rgba(242,239,233,.07); }
+  .modes button {
+    background: none; border: 0; color: var(--muted); cursor: pointer;
+    font: 500 12px/1 var(--sans); letter-spacing: .04em;
+    padding: 9px 15px; border-radius: 999px; transition: background .2s, color .2s;
+  }
+  .modes button[aria-pressed="true"] { background: var(--paper); color: var(--ink); }
+  .modes button:disabled { opacity: .4; cursor: default; }
+
+  .cams { display: grid; gap: 10px; width: 100%; grid-template-columns: repeat(3, 1fr); }
+  .pane { position: relative; background: var(--ink-2); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .pane video { width: 100%; aspect-ratio: 16/9; display: block; background: #000; }
+  .plabel {
+    position: absolute; left: 8px; top: 8px; z-index: 1;
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+    padding: 3px 7px; border-radius: 4px;
+    background: rgba(11,10,12,.72); color: var(--paper);
+  }
+  .mcwrap { flex: 1; min-height: 0; overflow-y: auto; width: 100%; display: flex; flex-direction: column; gap: 12px; }
+  .transport { display: flex; align-items: center; gap: 14px; }
+  .tbtn {
+    flex: none; width: 42px; height: 42px; border-radius: 50%;
+    background: var(--paper); color: var(--ink); border: 0; cursor: pointer;
+    display: grid; place-items: center;
+  }
+  .tbtn svg { width: 13px; height: 13px; fill: currentColor; }
+  .tbtn:disabled { opacity: .45; cursor: default; }
+  .scrub { flex: 1; appearance: none; height: 3px; border-radius: 2px; background: var(--line); cursor: pointer; }
+  .scrub::-webkit-slider-thumb { appearance: none; width: 13px; height: 13px; border-radius: 50%; background: var(--gold); }
+  .scrub::-moz-range-thumb { width: 13px; height: 13px; border: 0; border-radius: 50%; background: var(--gold); }
+  .tc { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 82px; text-align: right; }
+  .angles { display: flex; gap: 6px; flex-wrap: wrap; }
+  .angles button {
+    background: none; border: 1px solid var(--line); color: var(--muted);
+    font: 500 11px/1 var(--sans); padding: 7px 11px; border-radius: 999px; cursor: pointer;
+  }
+  .angles button[aria-pressed="true"] { border-color: var(--gold); color: var(--gold); }
+  .mcnote { font-size: 11.5px; color: var(--muted); margin: 0; }
+  .loading-note { color: var(--muted); font-size: 13px; padding: 20px 0; }
+
+  @media (max-width: 780px) { .cams { grid-template-columns: 1fr; } }
 
   @media (max-width: 560px) {
     .grid { grid-template-columns: 1fr; gap: 26px; }
@@ -204,85 +250,201 @@
         <h2 class="stage-title" id="stageTitle"></h2>
         <p class="stage-by" id="stageBy"></p>
       </div>
-      <button class="close" id="closeBtn" aria-label="Close player">&times;</button>
+      <div style="display:flex;gap:12px;align-items:center">
+        <div class="modes" role="group" aria-label="Playback mode">
+          <button id="modeCut" aria-pressed="true">Final cut</button>
+          <button id="modeCam" aria-pressed="false">All angles</button>
+        </div>
+        <button class="close" id="closeBtn" aria-label="Close player">&times;</button>
+      </div>
     </div>
     <div class="frame" id="frame"></div>
+    <div class="mcwrap" id="mcwrap" hidden>
+      <div class="cams" id="cams"></div>
+      <div class="transport">
+        <button class="tbtn" id="mcPlay" aria-label="Play"><svg viewBox="0 0 12 14"><path d="M0 0l12 7-12 7z"/></svg></button>
+        <input class="scrub" id="mcScrub" type="range" min="0" max="1000" value="0" aria-label="Seek">
+        <span class="tc" id="mcTime">0:00 / 0:00</span>
+      </div>
+      <div class="angles" id="mcAngles" hidden></div>
+      <p class="mcnote" id="mcNote"></p>
+    </div>
   </div>
 </dialog>
 
-<script>
-(async function () {
-  const grid = document.getElementById('grid');
-  const empty = document.getElementById('empty');
-  const dialog = document.getElementById('player');
-  const frame = document.getElementById('frame');
+<script type="module">
+import { MultiCam } from './multicam.js';
 
-  const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+const grid = document.getElementById('grid');
+const empty = document.getElementById('empty');
+const dialog = document.getElementById('player');
+const frame = document.getElementById('frame');
+const mcwrap = document.getElementById('mcwrap');
+const modeCut = document.getElementById('modeCut');
+const modeCam = document.getElementById('modeCam');
 
-  let data;
-  try {
-    const res = await fetch('reels.json', { cache: 'no-cache' });
-    if (!res.ok) throw new Error(res.status);
-    data = await res.json();
-  } catch {
-    empty.hidden = false;
-    empty.textContent = 'Could not load the performance list.';
-    return;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+let data, mcConfig = null, mc = null, current = null;
+
+try {
+  const res = await fetch('reels.json', { cache: 'no-cache' });
+  if (!res.ok) throw new Error(res.status);
+  data = await res.json();
+} catch {
+  empty.hidden = false;
+  empty.textContent = 'Could not load the performance list.';
+  throw new Error('no reels');
+}
+
+// Multi-cam is optional: if the proxies were never published the toggle simply
+// never appears, and the finished cut still plays.
+try {
+  const res = await fetch('multicam.json', { cache: 'no-cache' });
+  if (res.ok) mcConfig = await res.json();
+} catch { /* no multicam */ }
+
+const reels = data.reels ?? [];
+if (!reels.length) { empty.hidden = false; }
+
+document.getElementById('statCount').textContent = reels.length;
+document.getElementById('statMins').textContent = Math.round((data.totalSeconds ?? 0) / 60);
+
+const PLAY_ICON = '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M0 0l12 7-12 7z"/></svg>';
+const PAUSE_ICON = '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M0 0h4v14H0zM8 0h4v14H8z"/></svg>';
+
+grid.innerHTML = reels.map((r, i) => `
+  <button class="card" data-i="${i}">
+    <div class="shot">
+      <img src="${r.thumbnail}" alt="" loading="lazy" width="1280" height="720">
+      <span class="play"><span>${PLAY_ICON}</span></span>
+      <span class="len">${mmss(r.duration)}</span>
+    </div>
+    <div class="meta">
+      <span class="num">${String(i + 1).padStart(2, '0')}</span>
+      <span>
+        <h3 class="name">${esc(r.title)}</h3>
+        ${r.composer ? `<p class="by">${esc(r.composer)}</p>` : ''}
+      </span>
+    </div>
+  </button>
+`).join('');
+
+grid.addEventListener('click', (e) => {
+  const card = e.target.closest('.card');
+  if (card) open(reels[Number(card.dataset.i)]);
+});
+
+/** The concert-clock range for a reel, or null if multicam can't cover it. */
+function rangeFor(reel) {
+  if (!mcConfig) return null;
+  return (mcConfig.reels ?? []).find((r) => r.slug === reel.slug) ?? null;
+}
+
+function open(reel) {
+  current = reel;
+  document.getElementById('stageTitle').textContent = reel.title;
+  document.getElementById('stageBy').textContent = reel.composer ?? '';
+  modeCam.disabled = !rangeFor(reel);
+  showCut();
+  dialog.showModal();
+}
+
+function showCut() {
+  teardownCam();
+  mcwrap.hidden = true;
+  frame.hidden = false;
+  modeCut.setAttribute('aria-pressed', 'true');
+  modeCam.setAttribute('aria-pressed', 'false');
+  // Built fresh each time: swapping src on a reused iframe leaves the previous
+  // video's audio running in some browsers.
+  frame.innerHTML = `<iframe
+    src="https://iframe.videodelivery.net/${current.uid}?autoplay=true"
+    style="aspect-ratio:${current.portrait ? '9/16' : '16/9'};max-width:100%;max-height:100%"
+    allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture;"
+    allowfullscreen title="${esc(current.title)}"></iframe>`;
+}
+
+const mcPlay = document.getElementById('mcPlay');
+const mcScrub = document.getElementById('mcScrub');
+const mcTime = document.getElementById('mcTime');
+const mcAngles = document.getElementById('mcAngles');
+const mcNote = document.getElementById('mcNote');
+let scrubbing = false;
+
+async function showCam(angleId = null) {
+  const range = rangeFor(current);
+  if (!range) return;
+  frame.innerHTML = '';                 // stop the Stream player before decoding three more
+  frame.hidden = true;
+  mcwrap.hidden = false;
+  modeCut.setAttribute('aria-pressed', 'false');
+  modeCam.setAttribute('aria-pressed', 'true');
+
+  const solo = MultiCam.solo();
+  mcNote.textContent = solo
+    ? 'One angle at a time on a small screen — three video streams is more than a phone can decode.'
+    : 'Three cameras on one clock. Audio is the back camera, the same bed the edit uses.';
+  mcAngles.hidden = !solo;
+  if (solo) {
+    mcAngles.innerHTML = mcConfig.angles.map((a) =>
+      `<button data-angle="${a.id}" aria-pressed="${a.id === (angleId ?? mcConfig.angles[0].id)}">${esc(a.label)}</button>`
+    ).join('');
   }
 
-  const reels = data.reels ?? [];
-  if (!reels.length) { empty.hidden = false; return; }
+  mcPlay.disabled = true;
+  mcTime.textContent = 'buffering…';
+  mc?.destroy();
+  mc = new MultiCam(document.getElementById('cams'), mcConfig);
+  mc.onTick = (t, ended) => {
+    if (!scrubbing) mcScrub.value = String(Math.round(((t - range.in) / (range.out - range.in)) * 1000));
+    mcTime.textContent = `${mmss(Math.max(0, t - range.in))} / ${mmss(range.out - range.in)}`;
+    if (ended) mcPlay.innerHTML = PLAY_ICON;
+  };
+  await mc.open(range, angleId);
+  mcPlay.disabled = false;
+  mcPlay.innerHTML = PLAY_ICON;
+  mc.onTick(range.in);
+  await mc.play();
+  mcPlay.innerHTML = PAUSE_ICON;
+}
 
-  document.getElementById('statCount').textContent = reels.length;
-  document.getElementById('statMins').textContent = Math.round((data.totalSeconds ?? 0) / 60);
+mcPlay.addEventListener('click', async () => {
+  if (!mc) return;
+  if (mc.playing) { mc.pause(); mcPlay.innerHTML = PLAY_ICON; }
+  else { await mc.play(); mcPlay.innerHTML = PAUSE_ICON; }
+});
 
-  const PLAY_ICON = '<svg viewBox="0 0 12 14" aria-hidden="true"><path d="M0 0l12 7-12 7z"/></svg>';
+mcScrub.addEventListener('input', () => { scrubbing = true; });
+mcScrub.addEventListener('change', async () => {
+  const range = rangeFor(current);
+  if (!mc || !range) return;
+  const t = range.in + (Number(mcScrub.value) / 1000) * (range.out - range.in);
+  await mc.scrub(t);
+  scrubbing = false;
+  mcPlay.innerHTML = mc.playing ? PAUSE_ICON : PLAY_ICON;
+});
 
-  grid.innerHTML = reels.map((r, i) => `
-    <button class="card" data-i="${i}">
-      <div class="shot">
-        <img src="${r.thumbnail}" alt="" loading="lazy" width="1280" height="720">
-        <span class="play"><span>${PLAY_ICON}</span></span>
-        <span class="len">${mmss(r.duration)}</span>
-      </div>
-      <div class="meta">
-        <span class="num">${String(i + 1).padStart(2, '0')}</span>
-        <span>
-          <h3 class="name">${esc(r.title)}</h3>
-          ${r.composer ? `<p class="by">${esc(r.composer)}</p>` : ''}
-        </span>
-      </div>
-    </button>
-  `).join('');
+mcAngles.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-angle]');
+  if (b) showCam(b.dataset.angle);
+});
 
-  function esc(s) {
-    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  }
+modeCut.addEventListener('click', () => { if (modeCut.getAttribute('aria-pressed') !== 'true') showCut(); });
+modeCam.addEventListener('click', () => { if (modeCam.getAttribute('aria-pressed') !== 'true') showCam(); });
 
-  grid.addEventListener('click', (e) => {
-    const card = e.target.closest('.card');
-    if (card) open(reels[Number(card.dataset.i)]);
-  });
+function teardownCam() {
+  mc?.destroy();
+  mc = null;
+  mcwrap.hidden = true;
+}
 
-  function open(reel) {
-    document.getElementById('stageTitle').textContent = reel.title;
-    document.getElementById('stageBy').textContent = reel.composer ?? '';
-    // Built fresh each time: swapping the src on a reused iframe leaves the
-    // previous video's audio running in some browsers.
-    frame.innerHTML = `<iframe
-      src="https://iframe.videodelivery.net/${reel.uid}?autoplay=true"
-      style="aspect-ratio:${reel.portrait ? '9/16' : '16/9'};max-width:100%;max-height:100%"
-      allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture;"
-      allowfullscreen title="${esc(reel.title)}"></iframe>`;
-    dialog.showModal();
-  }
-
-  function close() { dialog.close(); }
-  document.getElementById('closeBtn').addEventListener('click', close);
-  // Tearing down the iframe on close is what actually stops playback.
-  dialog.addEventListener('close', () => { frame.innerHTML = ''; });
-  dialog.addEventListener('click', (e) => { if (e.target === dialog) close(); });
-})();
+document.getElementById('closeBtn').addEventListener('click', () => dialog.close());
+// Tearing everything down on close is what actually stops playback and the
+// three range-request streams behind it.
+dialog.addEventListener('close', () => { frame.innerHTML = ''; teardownCam(); });
+dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.close(); });
 </script>
 </body>
 </html>
